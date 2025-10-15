@@ -15,6 +15,7 @@ from typing_extensions import override
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
+from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
 
@@ -62,6 +63,7 @@ class Policy(BasePolicy):
         else:
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            # self._sample_actions_rtc = nnx_utils.module_jit(model.sample_actions_rtc)
             self._rng = rng or jax.random.key(0)
 
     @override
@@ -89,9 +91,18 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        action_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if isinstance(action_output, tuple):
+            actions = action_output[0]
+            output_tokens = action_output[1]
+            tokenizer = _tokenizer.PaligemmaTokenizer(max_len=50)
+            output_tokens = jnp.array(output_tokens, dtype=int)
+            print(f"Generated Subtask: {tokenizer.detokenize(output_tokens[0])}")
+        else:
+            action = action_output
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -109,6 +120,29 @@ class Policy(BasePolicy):
     def metadata(self) -> dict[str, Any]:
         return self._metadata
 
+    @override
+    def infer_rtc(self, obs: dict, prefix_actions: jax.Array, inference_delay: int, prefix_attention_horizon: int, max_guidance_weight: float) -> dict:  # type: ignore[misc]
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        # Make a batch and convert to jax.Array.
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+
+        start_time = time.monotonic()
+        self._rng, sample_rng = jax.random.split(self._rng) 
+        outputs = {
+            "state": inputs["state"],
+            "actions": self._sample_actions_rtc(sample_rng, _model.Observation.from_dict(inputs), prefix_actions, inference_delay, prefix_attention_horizon, max_guidance_weight),
+        }
+        # Unbatch and convert to np.ndarray.        # Unbatch and convert to np.ndarray.
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        model_time = time.monotonic() - start_time
+
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {
+            "infer_ms": model_time * 1000,
+        }
+        return outputs
 
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""

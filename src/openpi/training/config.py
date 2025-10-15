@@ -125,13 +125,13 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            case _model.ModelType.PI05:
-                assert isinstance(model_config, pi0_config.Pi0Config)
+            case _model.ModelType.RIGHT_PI05:
+                assert isinstance(model_config, pi05_config.Pi05Config)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizePrompt(
+                        _transforms.TokenizeHighPrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
                         ),
@@ -684,9 +684,32 @@ _CONFIGS = [
     TrainConfig(
         name="right_pi05_20",
         exp_name="debug_test",
-        model=pi05_config.Pi05Config(action_horizon=20, pi05=True),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/root/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
         data=LeRobotX2robotDataConfig(
+            repo_id="pi0_distribute_package",
+            base_config=DataConfig(
+            asset_id="pi0_distribute_package",
+            # local_files_only=True,
+            ),
+            # default_prompt="",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
+        # Check the base TrainConfig class for a full list of available hyperparameters.
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="right_pi05_20_move",
+        exp_name="debug_test",
+        model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
             asset_id="pi0_distribute_package",

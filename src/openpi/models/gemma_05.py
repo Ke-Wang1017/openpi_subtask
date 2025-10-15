@@ -231,11 +231,16 @@ class Attention(nn.Module):
 
         if kv_cache is None:
             idx, k_cache, v_cache = self._init_cache(k, v, attn_mask.shape[-1])
+            k, v = k_cache, v_cache
         else:
             idx, k_cache, v_cache = kv_cache
-            idx, k_cache, v_cache = self._update_cache(k, v, idx, k_cache, v_cache)
+            if k.shape[1] == 1: # Next token prediction, k,v length = 1
+                idx, k_cache, v_cache = self._update_cache(k, v, idx, k_cache, v_cache)
+                k, v = k_cache, v_cache
+            else: # Sample action, k,v length = action horizon; We don't update kv_cache here since it is no use
+                k = jnp.concatenate([k_cache, k], axis=1)
+                v = jnp.concatenate([v_cache, v], axis=1)
 
-        k, v = k_cache, v_cache
         kv_cache = (idx, k_cache, v_cache)
 
         q = einops.rearrange(q, "B T (K G) H -> B T K G H", K=self.configs[0].num_kv_heads)
@@ -385,7 +390,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(5,),  # 0=self, 6=deterministic
+            static_argnums=(5,),  # 0=self, 6=deterministic # TODO: 这里不一定是static argument了
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(

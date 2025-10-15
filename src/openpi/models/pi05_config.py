@@ -44,7 +44,7 @@ class Pi05Config(_model.BaseModelConfig):
     @property
     @override
     def model_type(self) -> _model.ModelType:
-        return _model.ModelType.PI05
+        return _model.ModelType.RIGHT_PI05
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi05":
