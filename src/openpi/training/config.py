@@ -19,10 +19,14 @@ import openpi.models.pi05_config as pi05_config
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
+import openpi.models.nnx_utils as nnx_utils
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.arx_policy as arx_policy
+import openpi.policies.vln_policy as vln_policy
+import openpi.policies.flexiv_subtask_policy as flexiv_subtask_policy
+import openpi.policies.flexiv_new_policy as flexiv_new_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -125,13 +129,13 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            case _model.ModelType.RIGHT_PI05:
-                assert isinstance(model_config, pi05_config.Pi05Config)
+            case _model.ModelType.PI05:
+                # Support both Pi05Config and Pi0Config with pi05=True
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizeHighPrompt(
+                        _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
                         ),
@@ -163,6 +167,26 @@ class ModelTransformFactory(GroupFactory):
                         )
                     ],
                 )
+
+
+@dataclasses.dataclass(frozen=True)
+class SubtaskModelTransformFactory(GroupFactory):
+    """Creates model transforms for subtask-based hierarchical learning."""
+    
+    def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
+        match model_config.model_type:
+            case _model.ModelType.PI05:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeHighLowPrompt(
+                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
+                    ],
+                )
+            case _:
+                raise ValueError(f"Subtask mode only supports PI05 model type, got {model_config.model_type}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -540,6 +564,96 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotVLNDataConfig(DataConfigFactory):
+    """
+    Data config for VLN LeRobot dataset.
+    Assumes features stored as:
+      - rgb: image (H, W, 3)
+      - depth_rgb: image (H, W, 3)
+      - point_goal: float32, shape (3,)
+      - actions: float32, shape (3,)
+      - task: string (optional)
+    """
+
+    default_prompt: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/rgb": "rgb",
+                        "observation/depth_rgb": "depth_rgb",
+                        "observation/point_goal": "point_goal",
+                        "actions": "actions",
+                        "task": "task",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[vln_policy.VLNInputs(model_type=model_config.model_type)],
+            outputs=[vln_policy.VLNOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFlexivSubtaskDataConfig(DataConfigFactory):
+    """
+    Data config for Flexiv robot with subtask support.
+    Assumes features stored as:
+      - exterior_image: image (3, 224, 224) uint8
+      - wrist_image_left: image (3, 224, 224) uint8
+      - state: float32, shape (10,)
+      - actions: float32, shape (horizon, 10)
+      - task: string (high-level task)
+      - subtask: string (low-level subtask)
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "exterior_image": "exterior_image",
+                        "wrist_image_left": "wrist_image_left",
+                        "state": "state",
+                        "actions": "actions",
+                        "task": "task",
+                        "subtask": "subtask",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[flexiv_subtask_policy.FlexivSubtaskInputs(model_type=model_config.model_type)],
+            outputs=[flexiv_subtask_policy.FlexivSubtaskOutputs()],
+        )
+
+        model_transforms = SubtaskModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -573,9 +687,9 @@ class TrainConfig:
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
 
     # Base directory for config assets (e.g., norm stats).
-    assets_base_dir: str = "/x2robot_v2/xinyuanfang/projects_v2/openpi/assets"
+    assets_base_dir: str = "/workspace/chenyj36@xiaopeng.com/openpi_assets"
     # Base directory for checkpoints.
-    checkpoint_base_dir: str = "/x2robot_v2/xinyuanfang/projects_v2/openpi/checkpoints"
+    checkpoint_base_dir: str = "/workspace/chenyj36@xiaopeng.com/openpi_checkpoints"
 
     # Random seed that will be used by random generators during training.
     seed: int = 42
@@ -590,7 +704,7 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 1000
+    save_interval: int = 5000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 1000
 
@@ -600,7 +714,7 @@ class TrainConfig:
     resume: bool = False
 
     # If true, will enable wandb logging.
-    wandb_enabled: bool = True
+    wandb_enabled: bool = False
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -659,10 +773,105 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     TrainConfig(
+        name="vln_pi05_24",
+        exp_name="debug_vln",
+        model=pi0_config.Pi0Config(action_horizon=24, max_token_len=256, pi05=True),
+        # 从头开始训练，不使用预训练权重（因为action维度不匹配）
+        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
+        data=LeRobotVLNDataConfig(
+            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/vln_n1_nav",  # 本地数据集路径
+            default_prompt="Navigate to the goal point",
+            base_config=DataConfig(
+                asset_id="vln_n1_nav",
+            ),
+        ),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi/openpi-assets/checkpoints/pi0_libero/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=100_000,
+        save_interval = 10000,
+        batch_size=8,  # 减小batch size
+        fsdp_devices=4,  # 使用4个GPU进行FSDP
+    ),
+    TrainConfig(
+        name="flexiv_pi05_subtask",
+        exp_name="flexiv_subtask",
+        model=pi05_config.Pi05Config(
+            action_horizon=10,
+            max_token_len=256,
+            discrete_state_input=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        data=LeRobotFlexivSubtaskDataConfig(
+            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
+            base_config=DataConfig(
+                asset_id="flexiv_subtask",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=100_000,
+        save_interval=10000,
+        batch_size=8,
+        fsdp_devices=4,
+        ema_decay=None,
+    ),
+
+    TrainConfig(
+        name="flexiv_pi05",
+        # gs://openpi-assets/checkpoints/pi0_droid/params
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),# "/home/server/Workspace/openpi/checkpoints/franka_sri_lora/franka-lora-pickupcup/19999"
+        data=SimpleDataConfig(
+            # repo_id="franka_sri_pickupcup",
+            # repo_id="test/flexiv_new",
+            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_new",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[flexiv_new_policy.FlexivLerobotInputs(
+                    model_type=model.model_type
+                )],
+                outputs=[flexiv_new_policy.FlexivOutputs()]
+            ),
+            base_config=DataConfig(
+                # local_files_only=True,
+                asset_id="flexiv_new",
+                prompt_from_task=True,
+            ),
+        ),
+        # batch_size=24,
+        # num_train_steps=90000,
+        # ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        fsdp_devices=4,
+        batch_size=8,
+        num_train_steps=150000,
+    ),
+    TrainConfig(
         name="left_pi05_20",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20, pi05=True),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
@@ -684,8 +893,9 @@ _CONFIGS = [
     TrainConfig(
         name="right_pi05_20",
         exp_name="debug_test",
-        model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=256),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05_droid/openpi-assets/checkpoints/pi05_droid/params"),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
@@ -777,6 +987,7 @@ _CONFIGS = [
         name="left_pi0_30",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=30),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
         weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",

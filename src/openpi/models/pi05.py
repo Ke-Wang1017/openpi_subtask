@@ -273,7 +273,7 @@ class Pi05(_model.BaseModel):
         self,
         rng: at.KeyArrayLike,
         observation: _model.Observation,
-        max_decoding_steps: int = 20,
+        max_decoding_steps: int = 200,
         PALIGEMMA_EOS_TOKEN: int = 1,
         temperature: float = 0.0,
     ) -> str:
@@ -341,6 +341,7 @@ class Pi05(_model.BaseModel):
         def cond(carry):
             _, _, _, _, all_eos, step = carry
             return (~all_eos) & (step < max_decoding_steps)
+            # return step < max_decoding_steps
 
         # Use lax.while_loop so we can jit the full decoding loop.
         _, _, output_tokens, kv_cache, _, _ = jax.lax.while_loop(

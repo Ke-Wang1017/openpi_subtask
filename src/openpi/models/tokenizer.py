@@ -13,10 +13,10 @@ import openpi.shared.download as download
 
 
 class PaligemmaTokenizer:
-    def __init__(self, max_len: int = 48):
+    def __init__(self, max_len: int = 256):
         self._max_len = max_len
 
-        path = download.maybe_download("/root/.cache/openpi/big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
         with path.open("rb") as f:
             self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
 
@@ -69,19 +69,22 @@ class PaligemmaTokenizer:
             mask = [True] * self._max_len
         return np.asarray(tokens), np.asarray(mask)
 
-    def tokenize_high_low_prompt(self, high_prompt: str, low_prompt: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def tokenize_high_low_prompt(self, high_prompt: str, low_prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
         cleaned_low_text = low_prompt.lower().strip().replace("_", " ").replace("\n", " ")
 
-        # # This is the Pi05 format, where the state is part of the discrete language input.
-        # discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
-        # state_str = " ".join(map(str, discretized_state))
+        # This is the Pi05 format, where the state is part of the discrete language input.
+        discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+        state_str = " ".join(map(str, discretized_state))
 
         # Remove the last punctuation character if present and add custom symbol
         if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
             cleaned_high_text = cleaned_high_text[:-1]
         cleaned_high_text += '.'  # Add your custom symbol here
-        sub_prompt_1 = f"Task: {cleaned_high_text} Subtask: "
+        sub_prompt_1 = f"Task: {cleaned_high_text}; State: {state_str}; Subtask: "
+        # print(f"sub_prompt_1: {sub_prompt_1}")
+        # sub_prompt_1 = f"Task: {cleaned_high_text}, Subtask: "
+        # sub_prompt_1 = f"Task: {cleaned_high_text},"
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
         ar_mask = [1] * len(tokens_1)
         loss_mask = [False] * len(tokens_1)
@@ -90,16 +93,16 @@ class PaligemmaTokenizer:
         if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
             cleaned_low_text = cleaned_low_text[:-1]
         cleaned_low_text += '.'  # Add your custom symbol here
-        sub_prompt_2 = f"{cleaned_low_text};\nAction: " # Warning: State is not included here which is different from original pi05
+        sub_prompt_2 = f"{cleaned_low_text};\nAction: " 
+        # sub_prompt_2 = f"{cleaned_low_text}"# Warning: State is not included here which is different from original pi05
         tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
         ar_mask += [1] * len(tokens_2)
         loss_mask += [True] * len(tokens_2)
 
-        # sub_prompt_3 = f"State: {state_str};\nAction: "
-        # tokens_3 = self._tokenizer.encode(sub_prompt_3)
-        # ar_mask += [0] * len(tokens_3)
-        # loss_mask += [False] * len(tokens_3)
+
         tokens = tokens_1 + tokens_2
+        # tokens = tokens_1 
+        
 
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
@@ -116,6 +119,8 @@ class PaligemmaTokenizer:
                 )
             tokens = tokens[: self._max_len]
             mask = [True] * self._max_len
+            ar_mask = ar_mask[: self._max_len]
+            loss_mask = loss_mask[: self._max_len]
 
         return np.asarray(tokens), np.asarray(mask), np.asarray(ar_mask), np.asarray(loss_mask)
 
