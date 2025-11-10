@@ -19,7 +19,7 @@ import openpi.models.pi05_config as pi05_config
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
-import openpi.models.nnx_utils as nnx_utils
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
@@ -176,11 +176,21 @@ class SubtaskModelTransformFactory(GroupFactory):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI05:
+                # ⭐ 根据 fast_token_loss_weight 决定是否使用 FAST tokens
+                use_fast_tokens = getattr(model_config, 'fast_token_loss_weight', 0.0) > 0
+                
+                # ⭐ 创建 tokenizer（带或不带 FAST）
+                tokenizer_kwargs = {"max_len": model_config.max_token_len}
+                if use_fast_tokens:
+                    fast_tokenizer_path = getattr(model_config, 'fast_tokenizer_path', "physical-intelligence/fast")
+                    tokenizer_kwargs["fast_tokenizer_path"] = fast_tokenizer_path
+                
                 return _transforms.Group(
                     inputs=[
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizeHighLowPrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            _tokenizer.PaligemmaTokenizer(**tokenizer_kwargs),
+                            use_fast_tokens=use_fast_tokens,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -797,13 +807,98 @@ _CONFIGS = [
         batch_size=8,  # 减小batch size
         fsdp_devices=4,  # 使用4个GPU进行FSDP
     ),
+    # ⭐ Flexiv Subtask Training Configurations - Three flexible training modes
+    
+    # Mode 1: Subtask + Flow Matching (Original Pi05 style)
     TrainConfig(
-        name="flexiv_pi05_subtask",
-        exp_name="flexiv_subtask",
+        name="flexiv_pi05_subtask_flow",
+        exp_name="flexiv_subtask_flow",
+        model=pi05_config.Pi05Config(
+            action_horizon=10,
+            action_dim=10,
+            max_token_len=256,
+            discrete_state_input=False,
+            # ⭐ Only use subtask and flow matching loss
+            subtask_loss_weight=1.0,
+            fast_token_loss_weight=0.0,  # Disable FAST token loss
+            flow_matching_loss_weight=1.0,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/workspace/chenyj36@xiaopeng.com/openpi_checkpoints/flexiv_pi05_subtask/flexiv_subtask/30000/params"
+        ),
+        # weight_loader=weight_loaders.CheckpointWeightLoader(
+        #     "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/openpi/checkpoints/flexiv_pi05/test_new/70000/params"
+        # ),
+        data=LeRobotFlexivSubtaskDataConfig(
+            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
+            base_config=DataConfig(
+                asset_id="flexiv_subtask",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=100_000,
+        save_interval=10000,
+        batch_size=128,
+        fsdp_devices=8,
+        ema_decay=0.999,
+    ),
+    
+    # Mode 2: Subtask + FAST Token (Discrete action tokens)
+    TrainConfig(
+        name="flexiv_pi05_subtask_fast",
+        exp_name="flexiv_subtask_fast",
         model=pi05_config.Pi05Config(
             action_horizon=10,
             max_token_len=256,
             discrete_state_input=False,
+            # ⭐ Only use subtask and FAST token loss
+            subtask_loss_weight=1.0,
+            fast_token_loss_weight=0,  # Enable FAST token loss
+            flow_matching_loss_weight=1,  # Disable flow matching
+            fast_tokenizer_path="/workspace/fast",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        
+        data=LeRobotFlexivSubtaskDataConfig(
+            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
+            base_config=DataConfig(
+                asset_id="flexiv_subtask",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=100_000,
+        save_interval=10000,
+        batch_size=128,
+        fsdp_devices=8,
+        ema_decay=0.999,
+    ),
+    
+    # Mode 3: Subtask + FAST + Flow (Hybrid - All three losses)
+    TrainConfig(
+        name="flexiv_pi05_subtask_hybrid",
+        exp_name="flexiv_subtask_hybrid",
+        model=pi05_config.Pi05Config(
+            action_horizon=10,
+            action_dim=10,
+            max_token_len=256,
+            discrete_state_input=False,
+            # ⭐ Use all three losses
+            subtask_loss_weight=1.0,
+            fast_token_loss_weight=0.5,  # Lower weight for FAST tokens
+            flow_matching_loss_weight=0.5,  # Lower weight for flow matching
+            fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
@@ -822,9 +917,9 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         save_interval=10000,
-        batch_size=8,
-        fsdp_devices=4,
-        ema_decay=None,
+        batch_size=128,
+        fsdp_devices=8,
+        ema_decay=0.999,
     ),
 
     TrainConfig(

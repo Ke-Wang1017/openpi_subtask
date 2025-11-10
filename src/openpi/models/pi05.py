@@ -98,6 +98,12 @@ class Pi05(_model.BaseModel):
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
+        
+        # ⭐ Save loss weights for flexible training modes
+        self.subtask_loss_weight = config.subtask_loss_weight
+        self.fast_token_loss_weight = config.fast_token_loss_weight
+        self.flow_matching_loss_weight = config.flow_matching_loss_weight
+        
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
@@ -203,70 +209,106 @@ class Pi05(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, real_action_dim: int=32, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        # TODO: Support only use part of loss (e.g. only)
+        # ⭐ Support flexible training with multiple loss types
         observation = _model.preprocess_observation(
             rng, observation, train=train, image_keys=list(observation.images.keys())
         )
 
-        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        total_loss = 0.0
+        kv_cache = None
+        
+        # ⭐ 1. Token Generation Loss (Subtask and/or FAST action tokens - computed separately)
+        if self.subtask_loss_weight > 0 or self.fast_token_loss_weight > 0:
+            prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            
+            # Compute one-hot targets: we predict *next* token, so shift the input tokens by one.
+            targets = jax.nn.one_hot(
+                observation.tokenized_prompt[:, 1:],
+                self.PaliGemma.llm.module.vocab_size,
+            )
 
-        ### 1. Subtask-Generation Loss (Cross-Entropy Loss)
-        # Compute one-hot targets: we predict *next* token, so shift the input tokens by one.
-        # TODO: Do we need state to perform subtask generation?
-        targets = jax.nn.one_hot(
-            observation.tokenized_prompt[:, 1:],
-            self.PaliGemma.llm.module.vocab_size,
-        )
+            # Use prefix tokens to perform token generation
+            prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            (prefix_out, _), kv_cache = self.PaliGemma.llm(
+                [prefix_token_embeddings, None], 
+                mask=prefix_attn_mask, 
+                positions=prefix_positions, 
+                adarms_cond=[None, None]
+            )
+            prefix_out = prefix_out[:, :-1]
 
-        # Use prefix tokens to perform subtask generation (Prefix: images*3, high-level prompt, low-level prompt, state?)
-        # We input the last token because the last token is used for flow loss
-        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        (prefix_out, _), kv_cache = self.PaliGemma.llm(
-            [prefix_token_embeddings, None], 
-            mask=prefix_attn_mask, 
-            positions=prefix_positions, 
-            adarms_cond=[None, None]
-        )
-        prefix_out = prefix_out[:, :-1]
+            # Decode from embedding to logits
+            logits = self.PaliGemma.llm(
+                prefix_out[:, -targets.shape[1] :], method='deembed'
+            )
+            logp = jax.nn.log_softmax(logits, axis=-1)
+            token_pplx = jnp.sum(targets * logp, axis=-1)
+            
+            # ⭐ 1a. Subtask Token Loss (separately weighted)
+            if self.subtask_loss_weight > 0:
+                # Use subtask_region_mask to compute loss only on subtask tokens
+                subtask_mask = getattr(observation, 'subtask_region_mask', None)
+                if subtask_mask is not None:
+                    subtask_mask = subtask_mask[:, 1:]  # Shift for next-token prediction
+                    subtask_loss = -jnp.sum(token_pplx * subtask_mask, axis=-1) / jnp.clip(jnp.sum(subtask_mask, -1), 1)
+                    total_loss = total_loss + self.subtask_loss_weight * subtask_loss
+                else:
+                    # Fallback: use overall loss_mask if region masks not available
+                    loss_mask = observation.token_loss_mask[:, 1:]
+                    subtask_loss = -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+                    total_loss = total_loss + self.subtask_loss_weight * subtask_loss
+            
+            # ⭐ 1b. FAST Action Token Loss (separately weighted)
+            if self.fast_token_loss_weight > 0:
+                # Use action_region_mask to compute loss only on action tokens
+                action_mask = getattr(observation, 'action_region_mask', None)
+                if action_mask is not None:
+                    action_mask = action_mask[:, 1:]  # Shift for next-token prediction
+                    action_loss = -jnp.sum(token_pplx * action_mask, axis=-1) / jnp.clip(jnp.sum(action_mask, -1), 1)
+                    total_loss = total_loss + self.fast_token_loss_weight * action_loss
 
-        # decode from embedding to logits
-        logits = self.PaliGemma.llm(
-            prefix_out[:, -targets.shape[1] :], method='deembed'
-        )
-        logp = jax.nn.log_softmax(logits, axis=-1)
+        # ⭐ 2. Flow Matching Loss (MSE Loss for continuous actions)
+        if self.flow_matching_loss_weight > 0:
+            # Ensure we have kv_cache from token generation, or compute prefix if not
+            if kv_cache is None:
+                prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+                prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+                prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+                (_, _), kv_cache = self.PaliGemma.llm(
+                    [prefix_token_embeddings, None], 
+                    mask=prefix_attn_mask, 
+                    positions=prefix_positions, 
+                    adarms_cond=[None, None]
+                )
+            
+            preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+            batch_shape = actions.shape[:-2]
+            noise = jax.random.normal(noise_rng, actions.shape)
+            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+            time_expanded = time[..., None, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
 
-        # Compute CE loss on token targets
-        assert observation.token_loss_mask is not None, "Token loss mask is required"
-        loss_mask = observation.token_loss_mask[:, 1:]
-        token_pplx = jnp.sum(targets * logp, axis=-1)
-        subtask_generation_loss = -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+            if 'prefix_mask' not in locals():
+                prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+            input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+            ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+            attn_mask = make_attn_mask(input_mask, ar_mask)
+            attn_mask = attn_mask[:, -suffix_tokens.shape[1]:, :] # Q is [B, action_dim, ...], KV is full length
+            positions = jnp.cumsum(input_mask, axis=1) - 1
+            positions = positions[:, -suffix_tokens.shape[1]:]
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens], kv_cache=kv_cache, mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        ### 2. Flow Matching Loss (MSE Loss)
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        batch_shape = actions.shape[:-2]
-        noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+            # Calculate flow loss with true actions (Real Action Dim <= Action Dim (Padding))
+            flow_loss = jnp.mean(jnp.square(v_t[:, :, :real_action_dim] - u_t[:, :, :real_action_dim]), axis=-1)
+            total_loss = total_loss + self.flow_matching_loss_weight * jnp.mean(flow_loss, axis=-1)
 
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        attn_mask = attn_mask[:, -suffix_tokens.shape[1]:, :] # Q is [B, action_dim, ...], KV is full length
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        positions = positions[:, -suffix_tokens.shape[1]:]
-        (_, suffix_out), _ = self.PaliGemma.llm(
-            [None, suffix_tokens], kv_cache=kv_cache, mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-
-        # Calculate flow loss with true actions (Real Action Dim <= Action Dim (Padding))
-        flow_loss = jnp.mean(jnp.square(v_t[:, :, :real_action_dim] - u_t[:, :, :real_action_dim]), axis=-1)
-
-        return subtask_generation_loss + jnp.mean(flow_loss, axis=-1)
+        return total_loss
 
     @override
     def sample_low_level_task(

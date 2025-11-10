@@ -285,6 +285,7 @@ class TokenizeHighPrompt(DataTransformFn):
 class TokenizeHighLowPrompt(DataTransformFn):
     """Tokenize high-level task and low-level subtask for hierarchical learning."""
     tokenizer: _tokenizer.PaligemmaTokenizer
+    use_fast_tokens: bool = False  # ⭐ 新增：是否使用 FAST tokens
     
     def __call__(self, data: DataDict) -> DataDict:
         high_prompt = data.pop("high_prompt", None)
@@ -302,15 +303,20 @@ class TokenizeHighLowPrompt(DataTransformFn):
         if state is None:
             raise ValueError("State is required for TokenizeHighLowPrompt")
         
-        tokens, token_masks, ar_mask, loss_mask = self.tokenizer.tokenize_high_low_prompt(
-            high_prompt, low_prompt, state
+        # ⭐ 根据配置决定是否传递 actions
+        actions = data.get("actions") if self.use_fast_tokens else None
+        
+        tokens, token_masks, ar_mask, loss_mask, subtask_region_mask, action_region_mask = self.tokenizer.tokenize_high_low_prompt(
+            high_prompt, low_prompt, state, actions
         )
         return {
             **data, 
             "tokenized_prompt": tokens, 
             "tokenized_prompt_mask": token_masks,
             "token_ar_mask": ar_mask,
-            "token_loss_mask": loss_mask
+            "token_loss_mask": loss_mask,
+            "subtask_region_mask": subtask_region_mask,  # ⭐ 新增
+            "action_region_mask": action_region_mask      # ⭐ 新增
         }
 
 
