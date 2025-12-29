@@ -31,6 +31,14 @@ class Pi05Config(_model.BaseModelConfig):
     pi05: bool = True
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    
+    # ⭐ Loss weights for flexible training modes
+    subtask_loss_weight: float = 1.0      # Subtask generation loss weight
+    fast_token_loss_weight: float = 0.0   # FAST token prediction loss weight
+    flow_matching_loss_weight: float = 1.0  # Flow matching loss weight
+    
+    # ⭐ FAST tokenizer configuration (required when fast_token_loss_weight > 0)
+    fast_tokenizer_path: str = "physical-intelligence/fast"
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -44,7 +52,7 @@ class Pi05Config(_model.BaseModelConfig):
     @property
     @override
     def model_type(self) -> _model.ModelType:
-        return _model.ModelType.RIGHT_PI05
+        return _model.ModelType.PI05
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi05":

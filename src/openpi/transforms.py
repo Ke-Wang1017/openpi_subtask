@@ -276,9 +276,49 @@ class TokenizeHighPrompt(DataTransformFn):
             
         if not isinstance(prompt, str):
             prompt = prompt.item()
-        print(f"tokenize high prompt: {prompt}")
+        # print(f"tokenize high prompt: {prompt}")
         tokens, token_masks = self.tokenizer.tokenize_high_level_prompt(prompt)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
+
+
+@dataclasses.dataclass(frozen=True)
+class TokenizeHighLowPrompt(DataTransformFn):
+    """Tokenize high-level task and low-level subtask for hierarchical learning."""
+    tokenizer: _tokenizer.PaligemmaTokenizer
+    use_fast_tokens: bool = False  # ⭐ 新增：是否使用 FAST tokens
+    
+    def __call__(self, data: DataDict) -> DataDict:
+        high_prompt = data.pop("high_prompt", None)
+        low_prompt = data.pop("low_prompt", None)
+        
+        if high_prompt is None or low_prompt is None:
+            raise ValueError("Both high_prompt and low_prompt are required for TokenizeHighLowPrompt")
+        
+        if not isinstance(high_prompt, str):
+            high_prompt = high_prompt.item()
+        if not isinstance(low_prompt, str):
+            low_prompt = low_prompt.item()
+            
+        state = data.get("state")
+        if state is None:
+            raise ValueError("State is required for TokenizeHighLowPrompt")
+        
+        # ⭐ 根据配置决定是否传递 actions
+        actions = data.get("actions") if self.use_fast_tokens else None
+        
+        tokens, token_masks, ar_mask, loss_mask, subtask_region_mask, action_region_mask = self.tokenizer.tokenize_high_low_prompt(
+            high_prompt, low_prompt, state, actions
+        )
+        return {
+            **data, 
+            "tokenized_prompt": tokens, 
+            "tokenized_prompt_mask": token_masks,
+            "token_ar_mask": ar_mask,
+            "token_loss_mask": loss_mask,
+            "subtask_region_mask": subtask_region_mask,  # ⭐ 新增
+            "action_region_mask": action_region_mask      # ⭐ 新增
+        }
+
 
 @dataclasses.dataclass(frozen=True)
 class TokenizeFASTInputs(DataTransformFn):
