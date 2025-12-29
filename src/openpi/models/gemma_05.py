@@ -164,7 +164,7 @@ class Attention(nn.Module):
         """Initialize KV cache"""
         prefill_len = k.shape[1]
         pad_width = ((0, 0), (0, cache_size - prefill_len), (0, 0), (0, 0))
-        cache_dtype =k.dtype  # self.cache_dtype or k.dtype
+        cache_dtype = k.dtype  # self.cache_dtype or k.dtype
         k_cache = jnp.pad(k.astype(cache_dtype), pad_width)
         v_cache = jnp.pad(v.astype(cache_dtype), pad_width)
         idx = jnp.zeros((k.shape[0],), dtype=jnp.int32) + prefill_len
@@ -234,10 +234,10 @@ class Attention(nn.Module):
             k, v = k_cache, v_cache
         else:
             idx, k_cache, v_cache = kv_cache
-            if k.shape[1] == 1: # Next token prediction, k,v length = 1
+            if k.shape[1] == 1:  # Next token prediction, k,v length = 1
                 idx, k_cache, v_cache = self._update_cache(k, v, idx, k_cache, v_cache)
                 k, v = k_cache, v_cache
-            else: # Sample action, k,v length = action horizon; We don't update kv_cache here since it is no use
+            else:  # Sample action, k,v length = action horizon; We don't update kv_cache here since it is no use
                 k = jnp.concatenate([k_cache, k], axis=1)
                 v = jnp.concatenate([v_cache, v], axis=1)
 
@@ -363,7 +363,9 @@ class Block(nn.Module):
         return xs, kv_cache
 
 
-KVCache: TypeAlias = tuple[at.Int[at.Array, "l b"], at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
+KVCache: TypeAlias = tuple[
+    at.Int[at.Array, "l b"], at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]
+]
 
 
 @at.typecheck

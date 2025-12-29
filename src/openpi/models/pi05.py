@@ -1,25 +1,22 @@
 import logging
-import pickle
+from typing import Literal, TypeAlias
 
 import einops
 import flax.nnx as nnx
 import flax.nnx.bridge as nnx_bridge
 import jax
 import jax.numpy as jnp
-import numpy as np
 from typing_extensions import override
-from typing import Callable
 
 from openpi.models import model as _model
 from openpi.models import pi05_config
 import openpi.models.gemma_05 as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
-from typing import Literal, TypeAlias, Self
 
 logger = logging.getLogger("openpi")
 PrefixAttentionSchedule: TypeAlias = Literal["linear", "exp", "ones", "zeros"]
+
 
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
@@ -47,6 +44,7 @@ def make_attn_mask(input_mask, mask_ar):
     attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
     valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
     return jnp.logical_and(attn_mask, valid_mask)
+
 
 @jax.vmap
 def left_to_right_align(x, input_mask, attn_mask):
@@ -98,12 +96,12 @@ class Pi05(_model.BaseModel):
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
-        
+
         # ⭐ Save loss weights for flexible training modes
         self.subtask_loss_weight = config.subtask_loss_weight
         self.fast_token_loss_weight = config.fast_token_loss_weight
         self.flow_matching_loss_weight = config.flow_matching_loss_weight
-        
+
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
@@ -207,7 +205,13 @@ class Pi05(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, real_action_dim: int=32, train: bool = False
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        real_action_dim: int = 32,
+        train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]:
         # ⭐ Support flexible training with multiple loss types
         observation = _model.preprocess_observation(
@@ -216,12 +220,12 @@ class Pi05(_model.BaseModel):
 
         total_loss = 0.0
         kv_cache = None
-        
+
         # ⭐ 1. Token Generation Loss (Subtask and/or FAST action tokens - computed separately)
         if self.subtask_loss_weight > 0 or self.fast_token_loss_weight > 0:
             prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
             prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-            
+
             # Compute one-hot targets: we predict *next* token, so shift the input tokens by one.
             targets = jax.nn.one_hot(
                 observation.tokenized_prompt[:, 1:],
@@ -231,24 +235,22 @@ class Pi05(_model.BaseModel):
             # Use prefix tokens to perform token generation
             prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
             (prefix_out, _), kv_cache = self.PaliGemma.llm(
-                [prefix_token_embeddings, None], 
-                mask=prefix_attn_mask, 
-                positions=prefix_positions, 
-                adarms_cond=[None, None]
+                [prefix_token_embeddings, None],
+                mask=prefix_attn_mask,
+                positions=prefix_positions,
+                adarms_cond=[None, None],
             )
             prefix_out = prefix_out[:, :-1]
 
             # Decode from embedding to logits
-            logits = self.PaliGemma.llm(
-                prefix_out[:, -targets.shape[1] :], method='deembed'
-            )
+            logits = self.PaliGemma.llm(prefix_out[:, -targets.shape[1] :], method="deembed")
             logp = jax.nn.log_softmax(logits, axis=-1)
             token_pplx = jnp.sum(targets * logp, axis=-1)
-            
+
             # ⭐ 1a. Subtask Token Loss (separately weighted)
             if self.subtask_loss_weight > 0:
                 # Use subtask_region_mask to compute loss only on subtask tokens
-                subtask_mask = getattr(observation, 'subtask_region_mask', None)
+                subtask_mask = getattr(observation, "subtask_region_mask", None)
                 if subtask_mask is not None:
                     subtask_mask = subtask_mask[:, 1:]  # Shift for next-token prediction
                     subtask_loss = -jnp.sum(token_pplx * subtask_mask, axis=-1) / jnp.clip(jnp.sum(subtask_mask, -1), 1)
@@ -258,11 +260,11 @@ class Pi05(_model.BaseModel):
                     loss_mask = observation.token_loss_mask[:, 1:]
                     subtask_loss = -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
                     total_loss = total_loss + self.subtask_loss_weight * subtask_loss
-            
+
             # ⭐ 1b. FAST Action Token Loss (separately weighted)
             if self.fast_token_loss_weight > 0:
                 # Use action_region_mask to compute loss only on action tokens
-                action_mask = getattr(observation, 'action_region_mask', None)
+                action_mask = getattr(observation, "action_region_mask", None)
                 if action_mask is not None:
                     action_mask = action_mask[:, 1:]  # Shift for next-token prediction
                     action_loss = -jnp.sum(token_pplx * action_mask, axis=-1) / jnp.clip(jnp.sum(action_mask, -1), 1)
@@ -276,12 +278,12 @@ class Pi05(_model.BaseModel):
                 prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
                 prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
                 (_, _), kv_cache = self.PaliGemma.llm(
-                    [prefix_token_embeddings, None], 
-                    mask=prefix_attn_mask, 
-                    positions=prefix_positions, 
-                    adarms_cond=[None, None]
+                    [prefix_token_embeddings, None],
+                    mask=prefix_attn_mask,
+                    positions=prefix_positions,
+                    adarms_cond=[None, None],
                 )
-            
+
             preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
             batch_shape = actions.shape[:-2]
             noise = jax.random.normal(noise_rng, actions.shape)
@@ -291,16 +293,20 @@ class Pi05(_model.BaseModel):
             u_t = noise - actions
 
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-            if 'prefix_mask' not in locals():
+            if "prefix_mask" not in locals():
                 prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
             input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
             ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
             attn_mask = make_attn_mask(input_mask, ar_mask)
-            attn_mask = attn_mask[:, -suffix_tokens.shape[1]:, :] # Q is [B, action_dim, ...], KV is full length
+            attn_mask = attn_mask[:, -suffix_tokens.shape[1] :, :]  # Q is [B, action_dim, ...], KV is full length
             positions = jnp.cumsum(input_mask, axis=1) - 1
-            positions = positions[:, -suffix_tokens.shape[1]:]
+            positions = positions[:, -suffix_tokens.shape[1] :]
             (_, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens], kv_cache=kv_cache, mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+                [None, suffix_tokens],
+                kv_cache=kv_cache,
+                mask=attn_mask,
+                positions=positions,
+                adarms_cond=[None, adarms_cond],
             )
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
@@ -316,10 +322,9 @@ class Pi05(_model.BaseModel):
         rng: at.KeyArrayLike,
         observation: _model.Observation,
         max_decoding_steps: int = 200,
-        PALIGEMMA_EOS_TOKEN: int = 1,
+        paligemma_eos_token: int = 1,
         temperature: float = 0.0,
     ) -> str:
-
         batch_size = observation.tokenized_prompt.shape[0]
         prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
@@ -359,11 +364,11 @@ class Pi05(_model.BaseModel):
 
             # Check for early stopping --> stop if all batch elements have EOS token
             ### TODO: erase extra decoded token due to mismatch
-            has_eos = jnp.any(token == PALIGEMMA_EOS_TOKEN, axis=-1)
+            has_eos = jnp.any(token == paligemma_eos_token, axis=-1)
             all_eos = jnp.all(has_eos)
 
             # Decode one step
-            token_embedding =  self.PaliGemma.llm(token, method="embed")
+            token_embedding = self.PaliGemma.llm(token, method="embed")
             positions = prefill_len[:, None] + step
             mask = jnp.logical_and(
                 jnp.arange(prefill_size + max_decoding_steps)[None, None, :] >= prefix_start[:, None, None],
@@ -390,7 +395,7 @@ class Pi05(_model.BaseModel):
             cond, step, (rng, last_logits, output_tokens, kv_cache, False, 0)
         )
 
-        mask = jnp.concatenate([prefix_mask, (output_tokens!=0).astype(jnp.bool_)], axis=1)
+        mask = jnp.concatenate([prefix_mask, (output_tokens != 0).astype(jnp.bool_)], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(max_decoding_steps, dtype=jnp.bool_)], axis=0)
         # 注意:
         #  output_tokens [B, max_decoding_steps]
@@ -418,7 +423,9 @@ class Pi05(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # Get all the prefix tokens, mask, and ar mask
-        output_tokens, kv_cache, prefix_mask, prefix_ar_mask = self.sample_low_level_task(rng, observation, max_decoding_steps=20, PALIGEMMA_EOS_TOKEN=1, temperature=0.0)
+        output_tokens, kv_cache, prefix_mask, _prefix_ar_mask = self.sample_low_level_task(
+            rng, observation, max_decoding_steps=20, paligemma_eos_token=1, temperature=0.0
+        )
 
         def step(carry):
             x_t, time = carry
@@ -434,7 +441,9 @@ class Pi05(_model.BaseModel):
             # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
             # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            query_attn_mask = full_attn_mask[:, -suffix_tokens.shape[1]:, :] # [B, suffix_len, prefix_len + suffix_len]
+            query_attn_mask = full_attn_mask[
+                :, -suffix_tokens.shape[1] :, :
+            ]  # [B, suffix_len, prefix_len + suffix_len]
 
             assert full_attn_mask.shape == (
                 batch_size,
@@ -448,7 +457,7 @@ class Pi05(_model.BaseModel):
                 [None, suffix_tokens],
                 mask=query_attn_mask,
                 positions=positions,
-                kv_cache=kv_cache, # kv_cache is not updated during multiple denoising steps
+                kv_cache=kv_cache,  # kv_cache is not updated during multiple denoising steps
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
@@ -457,10 +466,10 @@ class Pi05(_model.BaseModel):
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
-            x_t, time = carry
+            _x_t, time = carry
             # robust to floating-point error
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        
+
         return (x_0, output_tokens)

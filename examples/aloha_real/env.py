@@ -1,4 +1,4 @@
-from typing import List, Optional  # noqa: UP035
+from typing import List  # noqa: UP035
 
 import einops
 from openpi_client import image_tools
@@ -13,7 +13,7 @@ class AlohaRealEnvironment(_environment.Environment):
 
     def __init__(
         self,
-        reset_position: Optional[List[float]] = None,  # noqa: UP006,UP007
+        reset_position: List[float] | None = None,  # noqa: UP006
         render_height: int = 224,
         render_width: int = 224,
     ) -> None:

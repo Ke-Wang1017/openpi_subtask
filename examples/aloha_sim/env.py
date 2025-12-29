@@ -39,7 +39,7 @@ class AlohaSimEnvironment(_environment.Environment):
 
     @override
     def apply_action(self, action: dict) -> None:
-        gym_obs, reward, terminated, truncated, info = self._gym.step(action["actions"])
+        gym_obs, reward, terminated, truncated, _info = self._gym.step(action["actions"])
         self._last_obs = self._convert_observation(gym_obs)  # type: ignore
         self._done = terminated or truncated
         self._episode_reward = max(self._episode_reward, reward)

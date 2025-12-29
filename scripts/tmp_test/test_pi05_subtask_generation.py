@@ -1,19 +1,21 @@
 import os
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["OPENPI_DATA_HOME"] = "/root/.cache/openpi"
 
-import numpy as np
-import jax
+import time
+
 import cv2
 from flax import nnx
-import time
-from openpi.models import model as _model
-import openpi.shared.nnx_utils as nnx_utils
+import jax
 import jax.numpy as jnp
-from openpi.training.config import get_config
-from openpi.models.tokenizer import PaligemmaTokenizer
+import numpy as np
+
+from openpi.models import model as _model
 from openpi.models.model import Observation
-from openpi.models.pi0 import make_attn_mask
+from openpi.models.tokenizer import PaligemmaTokenizer
+import openpi.shared.nnx_utils as nnx_utils
+from openpi.training.config import get_config
 
 PALIGEMMA_EOS_TOKEN = 1
 max_decoding_steps = 25
@@ -28,7 +30,7 @@ print("debug line 0-0")
 model = config.model.create(model_rng)
 
 # Load pretrained params
-print(f"debug line 0-1")
+print("debug line 0-1")
 graphdef, state = nnx.split(model)
 loader = config.weight_loader
 params = nnx.state(model)
@@ -44,8 +46,8 @@ model = nnx.merge(graphdef, state)
 ### Step 2: Construct an observation batch
 # load 3 images from tmp_test as uint8 format
 print("debug line 1")
-img_share_path = '/workspace/openpi/scripts/tmp_test'
-img_name_list = ['faceImg.png', 'leftImg.png', 'rightImg.png']
+img_share_path = "/workspace/openpi/scripts/tmp_test"
+img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]
 img_list = []
 for img_name in img_name_list:
     img_path = os.path.join(img_share_path, img_name)
@@ -60,23 +62,25 @@ img_dict = {
 
 
 # Tokenize the prompt
-high_level_prompt = 'Pick up the flashcard on the table'
-low_level_prompt = 'ABCDEFG'
+high_level_prompt = "Pick up the flashcard on the table"
+low_level_prompt = "ABCDEFG"
 tokenizer = PaligemmaTokenizer(max_len=50)
-tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask = tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt)
+tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask = tokenizer.tokenize_high_low_prompt(
+    high_level_prompt, low_level_prompt
+)
 
 print("debug line 2")
 
 # form a observation
 data = {
-    'image': img_dict,
-    'image_mask': {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict.keys()},
-    'state': jnp.zeros((1, 32), dtype=jnp.float32),
+    "image": img_dict,
+    "image_mask": {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict},
+    "state": jnp.zeros((1, 32), dtype=jnp.float32),
     # 'state': None,
-    'tokenized_prompt': jnp.stack([tokenized_prompt], axis=0),
-    'tokenized_prompt_mask': jnp.stack([tokenized_prompt_mask], axis=0),
-    'token_ar_mask': jnp.stack([token_ar_mask], axis=0),
-    'token_loss_mask': jnp.stack([token_loss_mask], axis=0),
+    "tokenized_prompt": jnp.stack([tokenized_prompt], axis=0),
+    "tokenized_prompt_mask": jnp.stack([tokenized_prompt_mask], axis=0),
+    "token_ar_mask": jnp.stack([token_ar_mask], axis=0),
+    "token_loss_mask": jnp.stack([token_loss_mask], axis=0),
 }
 observation = Observation.from_dict(data)
 rng = jax.random.key(42)
@@ -88,15 +92,17 @@ loss_mask = jnp.array(observation.token_loss_mask)
 new_tokenized_prompt = observation.tokenized_prompt.at[loss_mask].set(0)
 new_tokenized_prompt_mask = observation.tokenized_prompt_mask.at[loss_mask].set(False)
 new_observation = _model.Observation(
-                    images=observation.images,
-                    image_masks=observation.image_masks,
-                    state=observation.state,
-                    tokenized_prompt=new_tokenized_prompt,
-                    tokenized_prompt_mask=new_tokenized_prompt_mask,
-                    token_ar_mask=observation.token_ar_mask,
-                    token_loss_mask=observation.token_loss_mask,
-                    )
-observation = _model.preprocess_observation(None, new_observation, train=False, image_keys=list(observation.images.keys()))
+    images=observation.images,
+    image_masks=observation.image_masks,
+    state=observation.state,
+    tokenized_prompt=new_tokenized_prompt,
+    tokenized_prompt_mask=new_tokenized_prompt_mask,
+    token_ar_mask=observation.token_ar_mask,
+    token_loss_mask=observation.token_loss_mask,
+)
+observation = _model.preprocess_observation(
+    None, new_observation, train=False, image_keys=list(observation.images.keys())
+)
 observation = jax.tree.map(jax.device_put, observation)
 
 
@@ -105,14 +111,19 @@ observation = jax.tree.map(jax.device_put, observation)
 # Jax Just-in-time compilation
 # Make max_decoding_steps static for JIT to avoid tracer issues in jnp.pad
 model.jit_sample_low_level_task = nnx_utils.module_jit(model.sample_low_level_task, static_argnums=(3,))
-for i in range(3):
+for _i in range(3):
     start_time = time.time()
-    predicted_token, kv_cache, mask, ar_mask = model.jit_sample_low_level_task(rng, observation, max_decoding_steps, PALIGEMMA_EOS_TOKEN, temperature)
-    for i in range(predicted_token.shape[0]):
-        print('======================')
-        print(f"\033[31m[PRED]\033[0m " + tokenizer.detokenize(np.array(predicted_token[i], dtype=np.int32)), flush=True)
-        print(f"\033[31m[MASK]\033[0m " + tokenizer.detokenize(np.array(data['tokenized_prompt'], dtype=np.int32)), flush=True)
-        print('======================')
+    predicted_token, kv_cache, mask, ar_mask = model.jit_sample_low_level_task(
+        rng, observation, max_decoding_steps, PALIGEMMA_EOS_TOKEN, temperature
+    )
+    for j in range(predicted_token.shape[0]):
+        print("======================")
+        print("\033[31m[PRED]\033[0m " + tokenizer.detokenize(np.array(predicted_token[j], dtype=np.int32)), flush=True)
+        print(
+            "\033[31m[MASK]\033[0m " + tokenizer.detokenize(np.array(data["tokenized_prompt"], dtype=np.int32)),
+            flush=True,
+        )
+        print("======================")
     end_time = time.time()
     print(f"Time taken: {end_time - start_time} seconds")
     time.sleep(5)
@@ -123,6 +134,6 @@ for i in range(3):
 # print(output)
 
 
-### 20251005实验结果：完全乱输出，但是训练一下应该问题不大
-### 20251006实验结果：0-shot 正常输出： move to table and then pick up black pen，之前不行是因为用了pi0的ckpt
-### 20251010实验结果，0-shot 正常输出，jit加速后inference speed显著提升: A800上，第一次编译26s,之后稳定在1.4s左右
+### 20251005实验结果:完全乱输出,但是训练一下应该问题不大
+### 20251006实验结果:0-shot 正常输出: move to table and then pick up black pen,之前不行是因为用了pi0的ckpt
+### 20251010实验结果,0-shot 正常输出,jit加速后inference speed显著提升: A800上,第一次编译26s,之后稳定在1.4s左右

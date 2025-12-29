@@ -25,15 +25,16 @@ class VLNInputs(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         # state: optional 3D point goal (x, y, theta)
-        point_goal = data.get("observation/point_goal", None)
-        if point_goal is None:
-            state = np.zeros(3, dtype=np.float32)
-        else:
-            state = np.asarray(point_goal, dtype=np.float32)
+        point_goal = data.get("observation/point_goal")
+        state = np.zeros(3, dtype=np.float32) if point_goal is None else np.asarray(point_goal, dtype=np.float32)
 
         # images: rgb + depth (converted to 3-channel)
-        rgb = _parse_image(data["observation/rgb"]) if "observation/rgb" in data else np.zeros((224, 224, 3), dtype=np.uint8)
-        depth_src = data.get("observation/depth_rgb", None)
+        rgb = (
+            _parse_image(data["observation/rgb"])
+            if "observation/rgb" in data
+            else np.zeros((224, 224, 3), dtype=np.uint8)
+        )
+        depth_src = data.get("observation/depth_rgb")
         depth = _parse_image(depth_src) if depth_src is not None else np.zeros_like(rgb)
 
         # map to model image names
@@ -75,5 +76,3 @@ class VLNOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         # Ensure we only return the first 3 dims (x, y, theta)
         return {"actions": np.asarray(data["actions"])[:, :3]}
-
-

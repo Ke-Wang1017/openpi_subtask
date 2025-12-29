@@ -15,22 +15,19 @@ import tyro
 
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
-import openpi.models.pi05_config as pi05_config
-import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi05_config as pi05_config
 import openpi.models.tokenizer as _tokenizer
-import openpi.shared.nnx_utils as nnx_utils
 import openpi.policies.aloha_policy as aloha_policy
-import openpi.policies.droid_policy as droid_policy
-import openpi.policies.libero_policy as libero_policy
 import openpi.policies.arx_policy as arx_policy
-import openpi.policies.vln_policy as vln_policy
-import openpi.policies.flexiv_subtask_policy as flexiv_subtask_policy
+import openpi.policies.droid_policy as droid_policy
 import openpi.policies.flexiv_new_policy as flexiv_new_policy
+import openpi.policies.flexiv_subtask_policy as flexiv_subtask_policy
+import openpi.policies.libero_policy as libero_policy
+import openpi.policies.vln_policy as vln_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
-import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -172,19 +169,19 @@ class ModelTransformFactory(GroupFactory):
 @dataclasses.dataclass(frozen=True)
 class SubtaskModelTransformFactory(GroupFactory):
     """Creates model transforms for subtask-based hierarchical learning."""
-    
+
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI05:
                 # ⭐ 根据 fast_token_loss_weight 决定是否使用 FAST tokens
-                use_fast_tokens = getattr(model_config, 'fast_token_loss_weight', 0.0) > 0
-                
-                # ⭐ 创建 tokenizer（带或不带 FAST）
+                use_fast_tokens = getattr(model_config, "fast_token_loss_weight", 0.0) > 0
+
+                # ⭐ 创建 tokenizer(带或不带 FAST)
                 tokenizer_kwargs = {"max_len": model_config.max_token_len}
                 if use_fast_tokens:
-                    fast_tokenizer_path = getattr(model_config, 'fast_tokenizer_path', "physical-intelligence/fast")
+                    fast_tokenizer_path = getattr(model_config, "fast_tokenizer_path", "physical-intelligence/fast")
                     tokenizer_kwargs["fast_tokenizer_path"] = fast_tokenizer_path
-                
+
                 return _transforms.Group(
                     inputs=[
                         _transforms.ResizeImages(224, 224),
@@ -260,6 +257,7 @@ class SimpleDataConfig(DataConfigFactory):
             model_transforms=self.model_transforms(model_config),
         )
 
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotX2robotDataConfig(DataConfigFactory):
     default_prompt: str | None = None
@@ -272,7 +270,7 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        'images': {
+                        "images": {
                             "left_wrist_view": "left_wrist_view",
                             "face_view": "face_view",
                             "right_wrist_view": "right_wrist_view",
@@ -302,6 +300,7 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotX2robotMoveDataConfig(DataConfigFactory):
     default_prompt: str | None = None
@@ -314,7 +313,7 @@ class LeRobotX2robotMoveDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        'images': {
+                        "images": {
                             "left_wrist_view": "left_wrist_view",
                             "face_view": "face_view",
                             "right_wrist_view": "right_wrist_view",
@@ -343,6 +342,7 @@ class LeRobotX2robotMoveDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
+
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotAlohaDataConfig(DataConfigFactory):
@@ -763,12 +763,14 @@ _CONFIGS = [
         name="left_pi0_20",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -786,8 +788,10 @@ _CONFIGS = [
         name="vln_pi05_24",
         exp_name="debug_vln",
         model=pi0_config.Pi0Config(action_horizon=24, max_token_len=256, pi05=True),
-        # 从头开始训练，不使用预训练权重（因为action维度不匹配）
-        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
+        # 从头开始训练,不使用预训练权重(因为action维度不匹配)
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+        ),
         data=LeRobotVLNDataConfig(
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/vln_n1_nav",  # 本地数据集路径
             default_prompt="Navigate to the goal point",
@@ -803,12 +807,11 @@ _CONFIGS = [
             decay_lr=2.5e-6,
         ),
         num_train_steps=100_000,
-        save_interval = 10000,
+        save_interval=10000,
         batch_size=8,  # 减小batch size
         fsdp_devices=4,  # 使用4个GPU进行FSDP
     ),
     # ⭐ Flexiv Subtask Training Configurations - Three flexible training modes
-    
     # Mode 1: Subtask + Flow Matching (Original Pi05 style)
     TrainConfig(
         name="flexiv_pi05_subtask_flow",
@@ -847,7 +850,6 @@ _CONFIGS = [
         fsdp_devices=8,
         ema_decay=0.999,
     ),
-    
     # Mode 2: Subtask + FAST Token (Discrete action tokens)
     TrainConfig(
         name="flexiv_pi05_subtask_fast",
@@ -865,7 +867,6 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
         ),
-        
         data=LeRobotFlexivSubtaskDataConfig(
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
             base_config=DataConfig(
@@ -884,7 +885,6 @@ _CONFIGS = [
         fsdp_devices=8,
         ema_decay=0.999,
     ),
-    
     # Mode 3: Subtask + FAST + Flow (Hybrid - All three losses)
     TrainConfig(
         name="flexiv_pi05_subtask_hybrid",
@@ -921,7 +921,6 @@ _CONFIGS = [
         fsdp_devices=8,
         ema_decay=0.999,
     ),
-
     TrainConfig(
         name="flexiv_pi05",
         # gs://openpi-assets/checkpoints/pi0_droid/params
@@ -936,10 +935,8 @@ _CONFIGS = [
             # repo_id="test/flexiv_new",
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_new",
             data_transforms=lambda model: _transforms.Group(
-                inputs=[flexiv_new_policy.FlexivLerobotInputs(
-                    model_type=model.model_type
-                )],
-                outputs=[flexiv_new_policy.FlexivOutputs()]
+                inputs=[flexiv_new_policy.FlexivLerobotInputs(model_type=model.model_type)],
+                outputs=[flexiv_new_policy.FlexivOutputs()],
             ),
             base_config=DataConfig(
                 # local_files_only=True,
@@ -966,12 +963,14 @@ _CONFIGS = [
         name="left_pi05_20",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20, pi05=True),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+        ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -989,13 +988,15 @@ _CONFIGS = [
         name="right_pi05_20",
         exp_name="debug_test",
         model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=256),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05_droid/openpi-assets/checkpoints/pi05_droid/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05_droid/openpi-assets/checkpoints/pi05_droid/params"
+        ),
         # weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1013,12 +1014,14 @@ _CONFIGS = [
         name="right_pi05_20_move",
         exp_name="debug_test",
         model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1036,12 +1039,14 @@ _CONFIGS = [
         name="left_pi05_move_data_20",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20, pi05=True),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1063,8 +1068,8 @@ _CONFIGS = [
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1083,12 +1088,14 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=30),
         # weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1106,12 +1113,14 @@ _CONFIGS = [
         name="left_pi0_fixed",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1129,12 +1138,14 @@ _CONFIGS = [
         name="left_pi0_sort_mix",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1152,12 +1163,14 @@ _CONFIGS = [
         name="left_pi0_move_data_20",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1175,12 +1188,14 @@ _CONFIGS = [
         name="left_pi0_move_data_30",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=30),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
-            asset_id="pi0_distribute_package",
-            # local_files_only=True,
+                asset_id="pi0_distribute_package",
+                # local_files_only=True,
             ),
             # default_prompt="",
         ),
@@ -1207,11 +1222,13 @@ _CONFIGS = [
         data=LeRobotX2robotDataConfig(
             repo_id="sort-and-fold-clothes",
             base_config=DataConfig(
-            # local_files_only=True,
+                # local_files_only=True,
             ),
             # default_prompt="Sort and fold clothes",
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_fast_base/params"
+        ),
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,

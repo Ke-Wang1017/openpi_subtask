@@ -451,7 +451,7 @@ class FsqAttentionTokenizer(nn.Module):
         z = self.encoder(x, train=train, state_conditioning=obs)
 
         # Quantize
-        tokens, z = self.codebook(z)
+        _tokens, z = self.codebook(z)
 
         # Decode
         x = self.decoder(z, train=train, state_conditioning=obs)

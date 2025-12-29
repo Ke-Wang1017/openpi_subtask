@@ -99,7 +99,7 @@ class Policy(BasePolicy):
             output_tokens = jnp.array(output_tokens, dtype=int)
             print(f"Generated Subtask: {tokenizer.detokenize(output_tokens[0])}")
         else:
-            action = action_output
+            pass
         outputs = {
             "state": inputs["state"],
             "actions": actions,
@@ -121,7 +121,14 @@ class Policy(BasePolicy):
         return self._metadata
 
     @override
-    def infer_rtc(self, obs: dict, prefix_actions: jax.Array, inference_delay: int, prefix_attention_horizon: int, max_guidance_weight: float) -> dict:  # type: ignore[misc]
+    def infer_rtc(
+        self,
+        obs: dict,
+        prefix_actions: jax.Array,
+        inference_delay: int,
+        prefix_attention_horizon: int,
+        max_guidance_weight: float,
+    ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -129,10 +136,17 @@ class Policy(BasePolicy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
 
         start_time = time.monotonic()
-        self._rng, sample_rng = jax.random.split(self._rng) 
+        self._rng, sample_rng = jax.random.split(self._rng)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions_rtc(sample_rng, _model.Observation.from_dict(inputs), prefix_actions, inference_delay, prefix_attention_horizon, max_guidance_weight),
+            "actions": self._sample_actions_rtc(
+                sample_rng,
+                _model.Observation.from_dict(inputs),
+                prefix_actions,
+                inference_delay,
+                prefix_attention_horizon,
+                max_guidance_weight,
+            ),
         }
         # Unbatch and convert to np.ndarray.        # Unbatch and convert to np.ndarray.
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
@@ -143,6 +157,7 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
+
 
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""

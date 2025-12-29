@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 from typing import Literal
 
+import cv2
 import h5py
 from lerobot.common.datasets.lerobot_dataset import LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -150,8 +151,6 @@ def load_raw_images_per_camera(ep: h5py.File, cameras: list[str]) -> dict[str, n
             # load all images in RAM
             imgs_array = ep[f"/observations/images/{camera}"][:]
         else:
-            import cv2
-
             # load one compressed image after the other in RAM and uncompress
             imgs_array = []
             for data in ep[f"/observations/images/{camera}"]:
