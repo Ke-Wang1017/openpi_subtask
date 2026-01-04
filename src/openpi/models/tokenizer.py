@@ -20,7 +20,7 @@ class PaligemmaTokenizer:
         with path.open("rb") as f:
             self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
 
-        # ⭐ 可选:加载 FAST tokenizer
+        # Optional: Load FAST tokenizer
         self._fast_tokenizer = None
         self._fast_skip_tokens = 128
         if fast_tokenizer_path is not None:
@@ -63,31 +63,32 @@ class PaligemmaTokenizer:
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
         low_prompt.lower().strip().replace("_", " ").replace("\n", " ")
 
-        # This is the Pi05 format, where the state is part of the discrete language input.
-        discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
-        state_str = " ".join(map(str, discretized_state))
+        if state is not None:
+            # This is the Pi05 format, where the state is part of the discrete language input.
+            discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            state_str = " ".join(map(str, discretized_state))
 
-        # Remove the last punctuation character if present and add custom symbol
-        if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
-            cleaned_high_text = cleaned_high_text[:-1]
-        cleaned_high_text += "."  # Add your custom symbol here
-        sub_prompt_1 = f"Task: {cleaned_high_text}, State: {state_str}; Subtask: "
-        tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
-        ar_mask = [1] * len(tokens_1)
-        loss_mask = [False] * len(tokens_1)
+            # Remove the last punctuation character if present and add custom symbol
+            if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
+                cleaned_high_text = cleaned_high_text[:-1]
+            cleaned_high_text += "."  # Add your custom symbol here
+            sub_prompt_1 = f"Task: {cleaned_high_text}, State: {state_str}; Subtask: "
+            tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
+            ar_mask = [True] * len(tokens_1)
+            loss_mask = [False] * len(tokens_1)
 
-        # Remove the last punctuation character if present and add custom symbol
-        # if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
-        #     cleaned_low_text = cleaned_low_text[:-1]
-        # # cleaned_low_text += '.'  # Add your custom symbol here
-        # sub_prompt_2 = f"{cleaned_low_text}"
-        # # sub_prompt_2 = f"{cleaned_low_text}"# Warning: State is not included here which is different from original pi05
-        # tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
-        # ar_mask += [1] * len(tokens_2)
-        # loss_mask += [True] * len(tokens_2)
+            # Remove the last punctuation character if present and add custom symbol
+            # if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
+            #     cleaned_low_text = cleaned_low_text[:-1]
+            # # cleaned_low_text += '.'  # Add your custom symbol here
+            # sub_prompt_2 = f"{cleaned_low_text}"
+            # # sub_prompt_2 = f"{cleaned_low_text}"# Warning: State is not included here which is different from original pi05
+            # tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
+            # ar_mask += [1] * len(tokens_2)
+            # loss_mask += [True] * len(tokens_2)
 
-        # tokens = tokens_1 + tokens_2
-        tokens = tokens_1
+            # tokens = tokens_1 + tokens_2
+            tokens = tokens_1
 
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
@@ -109,11 +110,13 @@ class PaligemmaTokenizer:
 
         return np.asarray(tokens), np.asarray(mask), np.asarray(ar_mask), np.asarray(loss_mask)
 
+    # TODO: REMOVE replicated code
     def tokenize_high_level_prompt(self, high_prompt: str) -> tuple[np.ndarray, np.ndarray]:
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
+        # remove the last punctuation character if present
         if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
             cleaned_high_text = cleaned_high_text[:-1]
-        cleaned_high_text += "."  # Add your custom symbol here
+        cleaned_high_text += "."  # add a custom symbol here
         sub_prompt_1 = f"Task: {cleaned_high_text} Subtask: "
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
         if len(tokens_1) < self._max_len:
@@ -135,7 +138,7 @@ class PaligemmaTokenizer:
         high_prompt: str,
         low_prompt: str,
         state: np.ndarray | None = None,
-        actions: np.ndarray | None = None,  # ⭐ 新增:可选的 actions 用于 FAST tokenization
+        actions: np.ndarray | None = None,  # Optional: actions for FAST tokenization
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Tokenize high-low prompt with optional FAST action tokens.
@@ -165,33 +168,33 @@ class PaligemmaTokenizer:
         cleaned_high_text += "."
         sub_prompt_1 = f"Task: {cleaned_high_text}; State: {state_str}; Subtask: "
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
-        ar_mask = [1] * len(tokens_1)
+        ar_mask = [True] * len(tokens_1)
         loss_mask = [False] * len(tokens_1)
-        subtask_region_mask = [False] * len(tokens_1)  # ⭐ 标记 subtask 区域
-        action_region_mask = [False] * len(tokens_1)  # ⭐ 标记 action token 区域
+        subtask_region_mask = [False] * len(tokens_1)  # mark subtask region
+        action_region_mask = [False] * len(tokens_1)  # mark action token region
 
-        # 2. Low prompt (subtask) - 根据是否需要 FAST tokens 决定结尾
+        # 2. Low prompt (subtask) - decide the end token based on whether FAST tokens are needed
         if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
             cleaned_low_text = cleaned_low_text[:-1]
         cleaned_low_text += "."
 
         if actions is None or self._fast_tokenizer is None:
-            # Flow matching mode: 以 ";\nAction: " 结尾
+            # Flow matching mode: end with ";\nAction: "
             sub_prompt_2 = f"{cleaned_low_text};\nAction: "
             tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
         else:
-            # FAST token mode: 先 subtask,后面会加 action tokens
+            # FAST token mode: first subtask, then add action tokens
             sub_prompt_2 = f"{cleaned_low_text};"
             tokens_2 = self._tokenizer.encode(sub_prompt_2)
 
-        ar_mask += [1] * len(tokens_2)
+        ar_mask += [True] * len(tokens_2)
         loss_mask += [True] * len(tokens_2)
-        subtask_region_mask += [True] * len(tokens_2)  # ⭐ Subtask tokens
+        subtask_region_mask += [True] * len(tokens_2)  # mark subtask tokens
         action_region_mask += [False] * len(tokens_2)
 
         tokens = tokens_1 + tokens_2
 
-        # 3. ⭐ 可选:添加 FAST action tokens
+        # 3. Optional: add FAST action tokens
         if actions is not None and self._fast_tokenizer is not None:
             # Tokenize actions with FAST
             action_tokens_fast = self._fast_tokenizer(actions[None])[0]
@@ -205,10 +208,10 @@ class PaligemmaTokenizer:
             )
 
             tokens += action_seq
-            ar_mask += [1] * len(action_seq)
+            ar_mask += [True] * len(action_seq)
             loss_mask += [True] * len(action_seq)
             subtask_region_mask += [False] * len(action_seq)
-            action_region_mask += [True] * len(action_seq)  # ⭐ Action tokens
+            action_region_mask += [True] * len(action_seq)  # action tokens
 
         # 4. Padding
         tokens_len = len(tokens)
@@ -238,8 +241,8 @@ class PaligemmaTokenizer:
             np.asarray(mask),
             np.asarray(ar_mask),
             np.asarray(loss_mask),
-            np.asarray(subtask_region_mask),  # ⭐ 新增
-            np.asarray(action_region_mask),  # ⭐ 新增
+            np.asarray(subtask_region_mask), 
+            np.asarray(action_region_mask), 
         )
 
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:

@@ -24,7 +24,6 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.flexiv_new_policy as flexiv_new_policy
 import openpi.policies.flexiv_subtask_policy as flexiv_subtask_policy
 import openpi.policies.libero_policy as libero_policy
-import openpi.policies.vln_policy as vln_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -572,52 +571,6 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotVLNDataConfig(DataConfigFactory):
-    """
-    Data config for VLN LeRobot dataset.
-    Assumes features stored as:
-      - rgb: image (H, W, 3)
-      - depth_rgb: image (H, W, 3)
-      - point_goal: float32, shape (3,)
-      - actions: float32, shape (3,)
-      - task: string (optional)
-    """
-
-    default_prompt: str | None = None
-
-    @override
-    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/rgb": "rgb",
-                        "observation/depth_rgb": "depth_rgb",
-                        "observation/point_goal": "point_goal",
-                        "actions": "actions",
-                        "task": "task",
-                    }
-                )
-            ]
-        )
-
-        data_transforms = _transforms.Group(
-            inputs=[vln_policy.VLNInputs(model_type=model_config.model_type)],
-            outputs=[vln_policy.VLNOutputs()],
-        )
-
-        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
-
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=repack_transform,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-        )
-
-
 @dataclasses.dataclass(frozen=True)
 class LeRobotFlexivSubtaskDataConfig(DataConfigFactory):
     """
@@ -783,33 +736,6 @@ _CONFIGS = [
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
-    ),
-    TrainConfig(
-        name="vln_pi05_24",
-        exp_name="debug_vln",
-        model=pi0_config.Pi0Config(action_horizon=24, max_token_len=256, pi05=True),
-        # 从头开始训练,不使用预训练权重(因为action维度不匹配)
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
-        ),
-        data=LeRobotVLNDataConfig(
-            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/vln_n1_nav",  # 本地数据集路径
-            default_prompt="Navigate to the goal point",
-            base_config=DataConfig(
-                asset_id="vln_n1_nav",
-            ),
-        ),
-        # weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi/openpi-assets/checkpoints/pi0_libero/params"),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=3000,
-            peak_lr=2.5e-5,
-            decay_steps=150_000,
-            decay_lr=2.5e-6,
-        ),
-        num_train_steps=100_000,
-        save_interval=10000,
-        batch_size=8,  # 减小batch size
-        fsdp_devices=4,  # 使用4个GPU进行FSDP
     ),
     # ⭐ Flexiv Subtask Training Configurations - Three flexible training modes
     # Mode 1: Subtask + Flow Matching (Original Pi05 style)

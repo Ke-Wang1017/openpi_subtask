@@ -397,7 +397,7 @@ class Pi05(_model.BaseModel):
 
         mask = jnp.concatenate([prefix_mask, (output_tokens != 0).astype(jnp.bool_)], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(max_decoding_steps, dtype=jnp.bool_)], axis=0)
-        # 注意:
+        # Notice:
         #  output_tokens [B, max_decoding_steps]
         #  kv_cache [B, prefix_len+max_decoding_steps, ...]
         #  mask [B, prefix_len+max_decoding_steps]

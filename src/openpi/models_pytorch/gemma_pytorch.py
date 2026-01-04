@@ -9,6 +9,10 @@ from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
 
+# Type alias for KV cache: list of (idx, k_cache, v_cache) tuples, one per layer
+KVCache = list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
+
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(
         self,
@@ -88,6 +92,98 @@ class PaliGemmaWithExpertModel(nn.Module):
     def embed_language_tokens(self, tokens: torch.Tensor):
         return self.paligemma.language_model.embed_tokens(tokens)
 
+    def deembed(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Convert embeddings back to logits over vocabulary.
+
+        This is the inverse operation of embed_language_tokens().
+        Equivalent to JAX version: jnp.dot(embeddings, embedding_table.T)
+
+        Args:
+            embeddings: Tensor of shape (batch, seq_len, hidden_size)
+
+        Returns:
+            Logits tensor of shape (batch, seq_len, vocab_size)
+        """
+        # Matrix multiplication: embeddings @ embedding_table.T
+        # embedding_table shape: (vocab_size, hidden_size)
+        # Result shape: (batch, seq_len, vocab_size)
+        return torch.matmul(embeddings, self.paligemma.language_model.embed_tokens.weight.T)
+
+    def _init_cache(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cache_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Initialize KV cache with padding to cache_size.
+
+        Args:
+            k: Key tensor of shape (batch, num_heads, seq_len, head_dim)
+            v: Value tensor of shape (batch, num_heads, seq_len, head_dim)
+            cache_size: Maximum cache size (total sequence length)
+
+        Returns:
+            Tuple of (idx, k_cache, v_cache) where:
+                - idx: Current position index tensor of shape (batch,)
+                - k_cache: Padded key cache of shape (batch, num_heads, cache_size, head_dim)
+                - v_cache: Padded value cache of shape (batch, num_heads, cache_size, head_dim)
+        """
+        batch_size, num_heads, prefill_len, head_dim = k.shape
+
+        # Create padded cache tensors
+        k_cache = torch.zeros(
+            batch_size, num_heads, cache_size, head_dim,
+            dtype=k.dtype, device=k.device
+        )
+        v_cache = torch.zeros(
+            batch_size, num_heads, cache_size, head_dim,
+            dtype=v.dtype, device=v.device
+        )
+
+        # Copy initial k, v into cache
+        k_cache[:, :, :prefill_len, :] = k
+        v_cache[:, :, :prefill_len, :] = v
+
+        # Track current index (position after prefill)
+        idx = torch.full((batch_size,), prefill_len, dtype=torch.int64, device=k.device)
+
+        return idx, k_cache, v_cache
+
+    def _update_cache(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        idx: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Update KV cache with new key-value pairs (single token).
+
+        Args:
+            k: New key tensor of shape (batch, num_heads, 1, head_dim)
+            v: New value tensor of shape (batch, num_heads, 1, head_dim)
+            idx: Current position index tensor of shape (batch,)
+            k_cache: Existing key cache of shape (batch, num_heads, cache_size, head_dim)
+            v_cache: Existing value cache of shape (batch, num_heads, cache_size, head_dim)
+
+        Returns:
+            Tuple of (idx_new, k_cache, v_cache) with updated cache
+        """
+        assert k.shape[2] == 1, "Only support kv-cache updates of length 1"
+
+        current_idx = idx[0].item()  # Assume same index for all batch elements
+
+        # Update cache at current position using clone to avoid in-place modification
+        k_cache = k_cache.clone()
+        v_cache = v_cache.clone()
+        k_cache[:, :, current_idx : current_idx + 1, :] = k
+        v_cache[:, :, current_idx : current_idx + 1, :] = v
+
+        # Increment index
+        idx_new = idx + 1
+
+        return idx_new, k_cache, v_cache
+
     def forward(
         self,
         attention_mask: torch.Tensor | None = None,
@@ -96,6 +192,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         inputs_embeds: list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
+        kv_cache: KVCache | None = None,
     ):
         if adarms_cond is None:
             adarms_cond = [None, None]
@@ -111,6 +208,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
+            return [prefix_output, suffix_output], prefix_past_key_values, kv_cache
         elif inputs_embeds[0] is None:
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
@@ -123,6 +221,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
+            return [prefix_output, suffix_output], prefix_past_key_values, kv_cache
         else:
             models = [self.paligemma.language_model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
@@ -155,7 +254,9 @@ class PaliGemmaWithExpertModel(nn.Module):
                 self._debug_gc_printed = True
 
             # Define the complete layer computation function for gradient checkpointing
-            def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
+            def compute_layer_complete(
+                layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond, layer_kv_cache=None
+            ):
                 models = [self.paligemma.language_model, self.gemma_expert.model]
 
                 query_states = []
@@ -194,15 +295,48 @@ class PaliGemmaWithExpertModel(nn.Module):
                     query_states, key_states, cos, sin, unsqueeze_dim=1
                 )
 
+                # KV cache handling
+                new_layer_kv_cache = None
+                if layer_kv_cache is None:
+                    # Initialize cache (first forward pass / prefill)
+                    cache_size = attention_mask.shape[-1]
+                    idx, k_cache, v_cache = self._init_cache(key_states, value_states, cache_size)
+                    # Use full cached tensors for attention
+                    key_states_for_attn = k_cache
+                    value_states_for_attn = v_cache
+                    new_layer_kv_cache = (idx, k_cache, v_cache)
+                else:
+                    idx, k_cache, v_cache = layer_kv_cache
+                    seq_len = key_states.shape[2]
+                    if seq_len == 1:
+                        # Next token prediction: update cache
+                        idx, k_cache, v_cache = self._update_cache(
+                            key_states, value_states, idx, k_cache, v_cache
+                        )
+                        key_states_for_attn = k_cache
+                        value_states_for_attn = v_cache
+                        new_layer_kv_cache = (idx, k_cache, v_cache)
+                    else:
+                        # Action sampling: concatenate without updating cache
+                        current_idx = idx[0].item()
+                        key_states_for_attn = torch.cat(
+                            [k_cache[:, :, :current_idx, :], key_states], dim=2
+                        )
+                        value_states_for_attn = torch.cat(
+                            [v_cache[:, :, :current_idx, :], value_states], dim=2
+                        )
+                        # Keep original cache unchanged
+                        new_layer_kv_cache = (idx, k_cache, v_cache)
+
                 batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
 
-                # Attention computation
+                # Attention computation with cached key/values
                 att_output, _ = modeling_gemma.eager_attention_forward(
                     self.paligemma.language_model.layers[layer_idx].self_attn,
                     query_states,
-                    key_states,
-                    value_states,
+                    key_states_for_attn,
+                    value_states_for_attn,
                     attention_mask,
                     scaling,
                 )
@@ -235,27 +369,39 @@ class PaliGemmaWithExpertModel(nn.Module):
                     outputs_embeds.append(out_emb)
                     start_pos = end_pos
 
-                return outputs_embeds
+                return outputs_embeds, new_layer_kv_cache
+
+            # Initialize list for storing per-layer KV caches
+            new_kv_cache: KVCache = []
 
             # Process all layers with gradient checkpointing if enabled
             for layer_idx in range(num_layers):
+                # Get the layer's KV cache if available
+                layer_kv_cache = kv_cache[layer_idx] if kv_cache is not None else None
+
                 if use_gradient_checkpointing:
-                    inputs_embeds = torch.utils.checkpoint.checkpoint(
+                    # Note: gradient checkpointing doesn't easily support returning multiple values
+                    # For now, we skip KV cache when using gradient checkpointing during training
+                    result = torch.utils.checkpoint.checkpoint(
                         compute_layer_complete,
                         layer_idx,
                         inputs_embeds,
                         attention_mask,
                         position_ids,
                         adarms_cond,
+                        None,  # Don't use KV cache with gradient checkpointing
                         use_reentrant=False,
                         preserve_rng_state=False,
                     )
+                    inputs_embeds, layer_cache = result
                 else:
-                    inputs_embeds = compute_layer_complete(
-                        layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond
+                    inputs_embeds, layer_cache = compute_layer_complete(
+                        layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond, layer_kv_cache
                     )
 
-                # Old code removed - now using compute_layer_complete function above
+                # Store the new layer cache
+                if layer_cache is not None:
+                    new_kv_cache.append(layer_cache)
 
             # final norm
             # Define final norm computation function for gradient checkpointing
@@ -278,4 +424,8 @@ class PaliGemmaWithExpertModel(nn.Module):
             suffix_output = outputs_embeds[1]
             prefix_past_key_values = None
 
-        return [prefix_output, suffix_output], prefix_past_key_values
+            # Return the new KV cache if it was used
+            if len(new_kv_cache) > 0:
+                kv_cache = new_kv_cache
+
+        return [prefix_output, suffix_output], prefix_past_key_values, kv_cache
