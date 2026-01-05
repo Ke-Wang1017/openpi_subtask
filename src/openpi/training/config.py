@@ -717,7 +717,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
@@ -791,7 +791,7 @@ _CONFIGS = [
             fast_tokenizer_path="/workspace/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
         data=LeRobotFlexivSubtaskDataConfig(
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
@@ -827,7 +827,7 @@ _CONFIGS = [
             fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
         data=LeRobotFlexivSubtaskDataConfig(
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
@@ -853,7 +853,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),# "/home/server/Workspace/openpi/checkpoints/franka_sri_lora/franka-lora-pickupcup/19999"
         data=SimpleDataConfig(
@@ -890,7 +890,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20, pi05=True),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
@@ -915,9 +915,8 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=256),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05_droid/openpi-assets/checkpoints/pi05_droid/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_droid/params"
         ),
-        # weight_loader=weight_loaders.CheckpointWeightLoader("/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
             base_config=DataConfig(
@@ -941,7 +940,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
@@ -966,7 +965,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20, pi05=True),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",
@@ -1013,9 +1012,8 @@ _CONFIGS = [
         name="left_pi0_30",
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=30),
-        # weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
@@ -1040,7 +1038,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
         data=LeRobotX2robotDataConfig(
             repo_id="pi0_distribute_package",
@@ -1065,7 +1063,7 @@ _CONFIGS = [
         exp_name="debug_test",
         model=pi0_config.Pi0Config(action_horizon=20),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
         data=LeRobotX2robotMoveDataConfig(
             repo_id="pi0_distribute_package",

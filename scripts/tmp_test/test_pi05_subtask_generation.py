@@ -1,7 +1,7 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-os.environ["OPENPI_DATA_HOME"] = "/root/.cache/openpi"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["OPENPI_DATA_HOME"] = os.path.expanduser("~/.cache/openpi")
 
 import time
 
@@ -46,7 +46,7 @@ model = nnx.merge(graphdef, state)
 ### Step 2: Construct an observation batch
 # load 3 images from tmp_test as uint8 format
 print("debug line 1")
-img_share_path = "/workspace/openpi/scripts/tmp_test"
+img_share_path = os.path.dirname(os.path.abspath(__file__))
 img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]
 img_list = []
 for img_name in img_name_list:
@@ -64,9 +64,10 @@ img_dict = {
 # Tokenize the prompt
 high_level_prompt = "Pick up the flashcard on the table"
 low_level_prompt = "ABCDEFG"
-tokenizer = PaligemmaTokenizer(max_len=50)
-tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask = tokenizer.tokenize_high_low_prompt(
-    high_level_prompt, low_level_prompt
+dummy_state = np.zeros(32, dtype=np.float32)  # Dummy state for tokenization
+tokenizer = PaligemmaTokenizer(max_len=256, fast_tokenizer_path=None)
+tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask, subtask_region_mask, action_region_mask = tokenizer.tokenize_high_low_prompt(
+    high_level_prompt, low_level_prompt, state=dummy_state
 )
 
 print("debug line 2")
@@ -79,7 +80,7 @@ data = {
     # 'state': None,
     "tokenized_prompt": jnp.stack([tokenized_prompt], axis=0),
     "tokenized_prompt_mask": jnp.stack([tokenized_prompt_mask], axis=0),
-    "token_ar_mask": jnp.stack([token_ar_mask], axis=0),
+    "token_ar_mask": jnp.stack([token_ar_mask], axis=0).astype(jnp.int32),
     "token_loss_mask": jnp.stack([token_loss_mask], axis=0),
 }
 observation = Observation.from_dict(data)
