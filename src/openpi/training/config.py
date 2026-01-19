@@ -737,14 +737,16 @@ _CONFIGS = [
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
     ),
+
     # ⭐ Flexiv Subtask Training Configurations - Three flexible training modes
+    
     # Mode 1: Subtask + Flow Matching (Original Pi05 style)
     TrainConfig(
         name="flexiv_pi05_subtask_flow",
         exp_name="flexiv_subtask_flow",
         model=pi05_config.Pi05Config(
             action_horizon=10,
-            action_dim=10,
+            
             max_token_len=256,
             discrete_state_input=False,
             # ⭐ Only use subtask and flow matching loss
@@ -753,13 +755,10 @@ _CONFIGS = [
             flow_matching_loss_weight=1.0,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/workspace/chenyj36@xiaopeng.com/openpi_checkpoints/flexiv_pi05_subtask/flexiv_subtask/30000/params"
+            "/dataset-cpfs3-rc/lim@xiaopeng.com/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
         ),
-        # weight_loader=weight_loaders.CheckpointWeightLoader(
-        #     "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/openpi/checkpoints/flexiv_pi05/test_new/70000/params"
-        # ),
         data=LeRobotFlexivSubtaskDataConfig(
-            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
+            repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="flexiv_subtask",
             ),
@@ -772,29 +771,33 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         save_interval=10000,
-        batch_size=128,
+        batch_size=32,
         fsdp_devices=8,
         ema_decay=0.999,
+        wandb_enabled=True,
+
     ),
+    
     # Mode 2: Subtask + FAST Token (Discrete action tokens)
     TrainConfig(
         name="flexiv_pi05_subtask_fast",
         exp_name="flexiv_subtask_fast",
         model=pi05_config.Pi05Config(
-            action_horizon=10,
+            action_horizon=25,
             max_token_len=256,
             discrete_state_input=False,
             # ⭐ Only use subtask and FAST token loss
-            subtask_loss_weight=1.0,
-            fast_token_loss_weight=0,  # Enable FAST token loss
-            flow_matching_loss_weight=1,  # Disable flow matching
+            subtask_loss_weight=10.0,
+            fast_token_loss_weight=1.0,  # Enable FAST token loss weight
+            flow_matching_loss_weight=0.0,  # Disable flow matching
             fast_tokenizer_path="/workspace/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+            "/workspace/chenyj36@xiaopeng.com/pi05_base/params"
         ),
+        
         data=LeRobotFlexivSubtaskDataConfig(
-            repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
+            repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="flexiv_subtask",
             ),
@@ -807,10 +810,62 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         save_interval=10000,
-        batch_size=128,
+        batch_size=32,
         fsdp_devices=8,
         ema_decay=0.999,
+        wandb_enabled=True,
+
+    #     freeze_filter=nnx.All(
+    #      nnx.Param,
+    #      nnx_utils.PathRegex(".*llm.*"),             # 匹配所有 LLM 层
+    #      nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")) # 排除 action expert 分支
+    #  )
     ),
+        
+    # Mode 3: Action Expert
+    TrainConfig(
+        name="flexiv_pi05_action_expert",
+        exp_name="flexiv_action_expert",
+        model=pi05_config.Pi05Config(
+            action_horizon=25,
+            max_token_len=256,
+            discrete_state_input=False,
+            # ⭐ Only use subtask and FAST token loss
+            subtask_loss_weight=0.0,
+            fast_token_loss_weight=0.0,  # Enable FAST token loss weight
+            flow_matching_loss_weight=1.0,  # Disable flow matching
+            fast_tokenizer_path="/workspace/fast",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/workspace/chenyj36@xiaopeng.com/openpi_checkpoints/flexiv_pi05_subtask_fast/flexiv_subtask_fast_0106_10:1/99999/params"
+        ),
+        
+        data=LeRobotFlexivSubtaskDataConfig(
+            repo_id="KeWangRobotics/libero_10_subtasks",
+            base_config=DataConfig(
+                asset_id="flexiv_subtask",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=200_000,
+        save_interval=10000,
+        batch_size=32,
+        fsdp_devices=8,
+        ema_decay=0.999,
+        wandb_enabled=True,
+
+        freeze_filter=nnx.All(
+         nnx.Param,
+         nnx_utils.PathRegex(".*llm.*"),             # 匹配所有 LLM 层
+         nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")) # 排除 action expert 分支
+     )
+    ),
+    
     # Mode 3: Subtask + FAST + Flow (Hybrid - All three losses)
     TrainConfig(
         name="flexiv_pi05_subtask_hybrid",
@@ -827,7 +882,7 @@ _CONFIGS = [
             fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
         ),
         data=LeRobotFlexivSubtaskDataConfig(
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_subtask",
@@ -847,13 +902,14 @@ _CONFIGS = [
         fsdp_devices=8,
         ema_decay=0.999,
     ),
+
     TrainConfig(
         name="flexiv_pi05",
         # gs://openpi-assets/checkpoints/pi0_droid/params
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+            "/dataset-cpfs3-rc/lizj18/AGIWORLD_challenge/pi_checkpoint/openpi05/openpi-assets/checkpoints/pi05_base/params"
         ),
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),# "/home/server/Workspace/openpi/checkpoints/franka_sri_lora/franka-lora-pickupcup/19999"
         data=SimpleDataConfig(
@@ -861,8 +917,10 @@ _CONFIGS = [
             # repo_id="test/flexiv_new",
             repo_id="/workspace/chenyj36@xiaopeng.com/lerobot_datasets/test/flexiv_new",
             data_transforms=lambda model: _transforms.Group(
-                inputs=[flexiv_new_policy.FlexivLerobotInputs(model_type=model.model_type)],
-                outputs=[flexiv_new_policy.FlexivOutputs()],
+                inputs=[flexiv_new_policy.FlexivLerobotInputs(
+                    model_type=model.model_type
+                )],
+                outputs=[flexiv_new_policy.FlexivOutputs()]
             ),
             base_config=DataConfig(
                 # local_files_only=True,
@@ -884,6 +942,7 @@ _CONFIGS = [
         fsdp_devices=4,
         batch_size=8,
         num_train_steps=150000,
+    ),
     ),
     TrainConfig(
         name="left_pi05_20",
