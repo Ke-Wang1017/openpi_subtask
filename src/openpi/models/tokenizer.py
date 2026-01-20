@@ -108,7 +108,12 @@ class PaligemmaTokenizer:
             ar_mask = ar_mask[: self._max_len]
             loss_mask = loss_mask[: self._max_len]
 
-        return np.asarray(tokens), np.asarray(mask), np.asarray(ar_mask), np.asarray(loss_mask)
+        return (
+            np.asarray(tokens),
+            np.asarray(mask),
+            np.asarray(ar_mask, dtype=np.int32),
+            np.asarray(loss_mask),
+        )
 
     # TODO: REMOVE replicated code
     def tokenize_high_level_prompt(self, high_prompt: str) -> tuple[np.ndarray, np.ndarray]:
@@ -239,10 +244,10 @@ class PaligemmaTokenizer:
         return (
             np.asarray(tokens),
             np.asarray(mask),
-            np.asarray(ar_mask),
+            np.asarray(ar_mask, dtype=np.int32),
             np.asarray(loss_mask),
-            np.asarray(subtask_region_mask), 
-            np.asarray(action_region_mask), 
+            np.asarray(subtask_region_mask),
+            np.asarray(action_region_mask),
         )
 
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:

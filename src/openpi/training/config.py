@@ -491,9 +491,9 @@ class LeRobotLiberoSubtaskDataConfig(DataConfigFactory):
     Data config for Libero environment with subtask support.
     Assumes features stored as:
       - images.agentview_rgb: image (3, 128, 128) uint8
-      - images.wrist_rgb_left: image (3, 128, 128) uint8
-      - state: float32, shape (10,)
-      - actions: float32, shape (horizon, 10)
+      - images.wrist_rgb: image (3, 128, 128) uint8
+      - state: float32, shape (8,)
+      - actions: float32, shape (horizon, 7)
       - task: string (high-level task)
       - subtask: string (low-level subtask)
     """
@@ -505,7 +505,8 @@ class LeRobotLiberoSubtaskDataConfig(DataConfigFactory):
                 _transforms.RepackTransform(
                     {
                         "images.agentview_rgb": "images.agentview_rgb",
-                        "images.wrist_rgb_left": "images.wrist_rgb_left",
+                        # Map dataset wrist image name to the expected key.
+                        "images.wrist_rgb_left": "images.wrist_rgb",
                         "state": "state",
                         "actions": "actions",
                         "task": "task",
@@ -698,7 +699,7 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         save_interval=10000,
-        batch_size=64,
+        batch_size=96,
         fsdp_devices=1,
         ema_decay=0.999,
         wandb_enabled=True,

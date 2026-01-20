@@ -12,16 +12,16 @@ def make_libero_subtask_lerobot_example() -> dict:
     return {
         # 外部相机图像:LeRobot格式为通道优先(3,224,224),uint8
         "images.agentview_rgb": np.random.randint(256, size=(3, 128, 128), dtype=np.uint8),
-        # 左手腕相机图像:与外部图像格式一致
-        "images.wrist_rgb_left": np.random.randint(256, size=(3, 128, 128), dtype=np.uint8),
-        # 10维状态:由7维(3位置+3轴角+1夹爪)转换而来
-        "state": np.random.rand(10).astype(np.float32),
+        # 手腕相机图像:与外部图像格式一致
+        "images.wrist_rgb": np.random.randint(256, size=(3, 128, 128), dtype=np.uint8),
+        # 8维状态:由7维(3位置+3轴角+1夹爪)转换而来
+        "state": np.random.rand(8).astype(np.float32),
         # 高层任务指令
         "task": "pick up the red block and place it on the blue tray",
         # 低层子任务指令
         "subtask": "move arm to block position",
-        # 10维动作:与状态维度匹配
-        "actions": np.random.rand(30, 10).astype(np.float32),
+        # 7维动作:与动作维度匹配
+        "actions": np.random.rand(30, 7).astype(np.float32),
     }
 
 
@@ -61,17 +61,22 @@ class LiberoSubtaskInputs(transforms.DataTransformFn):
         if state.shape != (8,):
             raise ValueError(f"Libero state dimension error, expected 8, got {state.shape[0]}")
 
-        # 2. process image: parse LeRobot's exterior_image and wrist_image_left
+        # 2. process image: parse LeRobot's exterior_image and wrist_image
         exterior_image = _parse_lerobot_image(data["images.agentview_rgb"])
-        wrist_image_left = _parse_lerobot_image(data["images.wrist_rgb_left"])
+        if "images.wrist_rgb_left" in data:
+            wrist_image_left = _parse_lerobot_image(data["images.wrist_rgb_left"])
+        elif "images.wrist_rgb" in data:
+            wrist_image_left = _parse_lerobot_image(data["images.wrist_rgb"])
+        else:
+            raise KeyError("Missing wrist image key: expected 'images.wrist_rgb_left' or 'images.wrist_rgb'")
 
         # 3. organize image input based on model type
         match self.model_type:
             case _model.ModelType.PI0 | _model.ModelType.PI05:
                 # external camera + left wrist camera   
                 image_names = ("agentview_rgb", "wrist_rgb_left")
-                images = (exterior_image, wrist_image_left, np.zeros_like(exterior_image))
-                image_masks = (np.True_, np.True_, np.False_)
+                images = (exterior_image, wrist_image_left)
+                image_masks = (np.True_, np.True_)
             case _model.ModelType.PI0_FAST:
                 # external camera + padding image + left wrist camera
                 image_names = ("agentview_rgb", "agentview_rgb_padding", "wrist_rgb_left")
