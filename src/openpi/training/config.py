@@ -697,10 +697,10 @@ _CONFIGS = [
             decay_steps=150_000,
             decay_lr=2.5e-6,
         ),
-        num_train_steps=100_000,
-        save_interval=10000,
-        batch_size=96,
-        fsdp_devices=1,
+        num_train_steps=20_000,
+        save_interval=4000,
+        batch_size=512,
+        fsdp_devices=8,
         ema_decay=0.999,
         wandb_enabled=True,
 
@@ -726,7 +726,7 @@ _CONFIGS = [
             fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/kewang/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+            "/home/kewang/.cache/openpi/openpi-checkpoints/libero_pi05_subtask_fast/my_experiment/12000/params"
         ),
         
         data=LeRobotLiberoSubtaskDataConfig(
@@ -741,9 +741,9 @@ _CONFIGS = [
             decay_steps=150_000,
             decay_lr=2.5e-6,
         ),
-        num_train_steps=200_000,
-        save_interval=10000,
-        batch_size=32,
+        num_train_steps=8_000,
+        save_interval=2000,
+        batch_size=512,
         fsdp_devices=8,
         ema_decay=0.999,
         wandb_enabled=True,

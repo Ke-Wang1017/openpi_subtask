@@ -13,7 +13,7 @@ import openpi.shared.download as download
 
 
 class PaligemmaTokenizer:
-    def __init__(self, max_len: int = 256, fast_tokenizer_path: str = "/workspace/fast"):
+    def __init__(self, max_len: int = 256, fast_tokenizer_path: str | None = None):
         self._max_len = max_len
 
         path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
