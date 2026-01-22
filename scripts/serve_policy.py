@@ -71,7 +71,8 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     ),
     EnvMode.LIBERO: Checkpoint(
         config="pi05_libero",
-        dir="gs://openpi-assets/checkpoints/pi05_libero",
+        # dir="gs://openpi-assets/checkpoints/pi05_libero",
+        dir="/home/kewang/.cache/openpi/openpi-checkpoints/libero_pi05_action_expert/my_experiment_action_expert/4000",
     ),
 }
 

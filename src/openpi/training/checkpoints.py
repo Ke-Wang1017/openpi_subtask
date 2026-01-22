@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures as futures
 import dataclasses
 import logging
+import pathlib
 from typing import Protocol
 
 from etils import epath
@@ -109,9 +110,25 @@ def restore_state(
 
 def load_norm_stats(assets_dir: epath.Path | str, asset_id: str) -> dict[str, _normalize.NormStats] | None:
     norm_stats_dir = epath.Path(assets_dir) / asset_id
-    norm_stats = _normalize.load(norm_stats_dir)
-    logging.info(f"Loaded norm stats from {norm_stats_dir}")
-    return norm_stats
+    try:
+        norm_stats = _normalize.load(norm_stats_dir)
+        logging.info(f"Loaded norm stats from {norm_stats_dir}")
+        return norm_stats
+    except FileNotFoundError as exc:
+        assets_path = pathlib.Path(str(assets_dir))
+        candidates = list(assets_path.rglob("norm_stats.json"))
+        if len(candidates) == 1:
+            fallback_dir = candidates[0].parent
+            logging.warning(f"Norm stats not found at {norm_stats_dir}; using {fallback_dir}")
+            norm_stats = _normalize.load(fallback_dir)
+            logging.info(f"Loaded norm stats from {fallback_dir}")
+            return norm_stats
+        if candidates:
+            raise FileNotFoundError(
+                "Norm stats file not found at: "
+                f"{norm_stats_dir}. Found multiple candidates: {[str(p) for p in candidates]}"
+            ) from exc
+        raise
 
 
 class Callback(Protocol):
