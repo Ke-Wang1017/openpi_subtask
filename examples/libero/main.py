@@ -2,7 +2,11 @@ import collections
 import dataclasses
 import logging
 import math
+import os
 import pathlib
+
+# Default to headless software rendering unless the user sets MUJOCO_GL.
+os.environ.setdefault("MUJOCO_GL", "osmesa")
 
 import imageio
 from libero.libero import benchmark
