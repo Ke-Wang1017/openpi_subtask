@@ -132,17 +132,16 @@ def eval_libero(args: Args) -> None:
                         # Finished executing previous action chunk -- compute new chunk
                         # Prepare observations dict
                         element = {
-                            "images.agentview_rgb": img,
-                            "images.wrist_rgb_left": wrist_img,
-                            "state": np.concatenate(
+                            "observation/image": img,
+                            "observation/wrist_image": wrist_img,
+                            "observation/state": np.concatenate(
                                 (
                                     obs["robot0_eef_pos"],
                                     _quat2axisangle(obs["robot0_eef_quat"]),
                                     obs["robot0_gripper_qpos"],
                                 )
                             ),
-                            "task": str(task_description),
-                            "subtask": str(task_description),
+                            "prompt": str(task_description),
                         }
 
                         # Query model to get action

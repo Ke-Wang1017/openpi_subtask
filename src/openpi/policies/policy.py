@@ -99,7 +99,7 @@ class Policy(BasePolicy):
             output_tokens = jnp.array(output_tokens, dtype=int)
             print(f"Generated Subtask: {tokenizer.detokenize(output_tokens[0])}")
         else:
-            pass
+            actions = action_output
         outputs = {
             "state": inputs["state"],
             "actions": actions,
