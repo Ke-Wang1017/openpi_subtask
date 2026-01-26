@@ -13,8 +13,19 @@
 ### 1. 启动服务器
 
 ```bash
-cd /root/workspace/chenyj36@xiaopeng.com/openpi_pure_subtask/scripts/async_pi05
+cd /path/to/openpi/scripts/async_pi05
 python async_pi05_websocket_server.py
+```
+
+使用自定义权重路径:
+
+```bash
+export OPENPI_DATA_HOME=$HOME/.cache/openpi
+python async_pi05_websocket_server.py \
+    --config libero_pi05_action_expert \
+    --checkpoint /home/kewang/checkpoints/4000 \
+    --host 0.0.0.0 \
+    --port 8765
 ```
 
 ### 2. 运行快速测试
@@ -152,6 +163,7 @@ python test_subtask_refresh.py \
 - `port`: 服务器端口 (默认: 8765)
 - `config_name`: 模型配置 (默认: right_pi05_20)
 - `gpu_id`: GPU 设备 ID (默认: 1)
+- `checkpoint`: 覆盖权重路径 (目录或 params 文件)
 
 ### 推理参数
 - `high_level_prompt`: 高级任务描述

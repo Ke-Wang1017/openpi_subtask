@@ -17,10 +17,21 @@ logger = logging.getLogger(__name__)
 class AsyncPi05WebSocketServer:
     """基于 WebSocket 的异步 Pi0.5 推理服务器"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765, config_name: str = "right_pi05_20", gpu_id: int = 1):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+        config_name: str = "right_pi05_20",
+        gpu_id: int = 1,
+        checkpoint_path: str | None = None,
+    ):
         self.host = host
         self.port = port
-        self.inference_engine = AsyncPi05Inference(config_name=config_name, gpu_id=gpu_id)
+        self.inference_engine = AsyncPi05Inference(
+            config_name=config_name,
+            gpu_id=gpu_id,
+            checkpoint_path=checkpoint_path,
+        )
         self.clients = set()
         self.active_refresh_tasks = {}  # 存储活跃的刷新任务
 
@@ -42,7 +53,7 @@ class AsyncPi05WebSocketServer:
 
         logger.info(f"客户端断开: {websocket.remote_address}")
 
-    async def handle_client(self, websocket: WebSocketServerProtocol, path: str):
+    async def handle_client(self, websocket: WebSocketServerProtocol, path: str | None = None):
         """处理客户端连接"""
         await self.register_client(websocket)
 
@@ -137,9 +148,10 @@ class AsyncPi05WebSocketServer:
             total_time = time.time() - start_time
 
             # 构建响应
+            actions = results["actions"]
             response = {
                 "status": "success",
-                "actions": results["actions"].tolist(),
+                "actions": actions.tolist() if actions is not None else None,
                 "subtask": results["subtask"],
                 "subtask_tokens": results["subtask_tokens"].tolist() if results["subtask_tokens"] is not None else None,
                 "state": results["state"].tolist() if results["state"] is not None else None,
@@ -199,7 +211,7 @@ class AsyncPi05WebSocketServer:
 
                 # 准备新的观察数据
                 observation = self.inference_engine.prepare_observation(
-                    images, high_level_prompt, low_level_prompt, state
+                    images, high_level_prompt, low_level_prompt, state, mask_subtask_tokens=True
                 )
 
                 # 生成新的子任务
@@ -267,6 +279,12 @@ async def main():
     parser.add_argument("--port", type=int, default=8765, help="监听端口")
     parser.add_argument("--config", type=str, default="right_pi05_20", help="模型配置名称")
     parser.add_argument("--gpu-id", type=int, default=0, help="GPU ID,CPU 可用 -1")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Override checkpoint path (directory or params file).",
+    )
     parser.add_argument("--skip-init", action="store_true", help="跳过模型初始化,仅用于连通性测试")
     parser.add_argument("--log-level", type=str, default="INFO", help="日志级别: DEBUG/INFO/WARN/ERROR")
     args = parser.parse_args()
@@ -278,7 +296,13 @@ async def main():
     )
 
     # 创建并启动服务器
-    server = AsyncPi05WebSocketServer(host=args.host, port=args.port, config_name=args.config, gpu_id=args.gpu_id)
+    server = AsyncPi05WebSocketServer(
+        host=args.host,
+        port=args.port,
+        config_name=args.config,
+        gpu_id=args.gpu_id,
+        checkpoint_path=args.checkpoint,
+    )
 
     await server.start_server(skip_init=args.skip_init)
 

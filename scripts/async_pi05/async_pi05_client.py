@@ -198,7 +198,10 @@ async def test_single_inference():
         # 打印结果
         print("推理结果:")
         print(f"状态: {result.get('status')}")
-        print(f"动作形状: {np.array(result['actions']).shape}")
+        if result.get("actions") is not None:
+            print(f"动作形状: {np.array(result['actions']).shape}")
+        else:
+            print("动作形状: None")
         print(f"生成的子任务: {result.get('subtask')}")
         print(f"时序信息: {result.get('timing')}")
         print(f"客户端时序: {result.get('client_timing')}")
@@ -250,7 +253,10 @@ async def test_batch_inference():
             else:
                 print(f"请求 {i + 1} 成功:")
                 print(f"  子任务: {result.get('subtask')}")
-                print(f"  动作形状: {np.array(result['actions']).shape}")
+                if result.get("actions") is not None:
+                    print(f"  动作形状: {np.array(result['actions']).shape}")
+                else:
+                    print("  动作形状: None")
 
     except Exception as e:
         logger.error(f"批量测试失败: {e}")
@@ -291,7 +297,10 @@ async def test_periodic_refresh():
 
         print("初始推理结果:")
         print(f"状态: {result.get('status')}")
-        print(f"动作形状: {np.array(result['actions']).shape}")
+        if result.get("actions") is not None:
+            print(f"动作形状: {np.array(result['actions']).shape}")
+        else:
+            print("动作形状: None")
         print(f"初始子任务: {result.get('subtask')}")
         print(f"定期刷新已启用: {result.get('subtask_refresh_enabled')}")
         print(f"刷新间隔: {result.get('subtask_refresh_interval')}秒")

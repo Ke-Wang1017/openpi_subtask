@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import collections
 import dataclasses
+import json
 import logging
 import math
 import os
 import pathlib
+from typing import Dict
 
 # Default to headless software rendering unless the user sets MUJOCO_GL.
 os.environ.setdefault("MUJOCO_GL", "osmesa")
@@ -14,12 +18,53 @@ from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import numpy as np
 from openpi_client import image_tools
-from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
+import websockets.sync.client
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+
+class SubtaskWebsocketClient:
+    """JSON websocket client for async_pi05_websocket_server.py."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+        uri = f"ws://{host}:{port}"
+        logging.info("Connecting to subtask server: %s", uri)
+        self._ws = websockets.sync.client.connect(uri, compression=None, max_size=None)
+        metadata = self._ws.recv()
+        self._metadata = json.loads(metadata)
+        logging.info("Server metadata: %s", self._metadata)
+
+    def infer(
+        self,
+        *,
+        images: Dict[str, np.ndarray],
+        high_level_prompt: str,
+        low_level_prompt: str,
+        state: np.ndarray,
+        generate_subtask: bool,
+        max_decoding_steps: int,
+        temperature: float,
+    ) -> dict:
+        request = {
+            "images": {key: value.tolist() for key, value in images.items()},
+            "high_level_prompt": high_level_prompt,
+            "low_level_prompt": low_level_prompt,
+            "state": state.tolist(),
+            "generate_subtask": generate_subtask,
+            "max_decoding_steps": max_decoding_steps,
+            "temperature": temperature,
+        }
+        self._ws.send(json.dumps(request))
+        response = json.loads(self._ws.recv())
+        if response.get("status") == "error":
+            raise RuntimeError(f"Server error: {response.get('error')}")
+        return response
+
+    def close(self) -> None:
+        self._ws.close()
 
 
 @dataclasses.dataclass
@@ -28,9 +73,11 @@ class Args:
     # Model server parameters
     #################################################################################################################
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8765
     resize_size: int = 224
     replan_steps: int = 5
+    max_decoding_steps: int = 25
+    temperature: float = 0.1
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -38,14 +85,13 @@ class Args:
     task_suite_name: str = (
         "libero_10"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
-    num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
+    num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
-
     seed: int = 7  # Random Seed (for reproducibility)
 
 
@@ -57,7 +103,7 @@ def eval_libero(args: Args) -> None:
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
-    logging.info(f"Task suite: {args.task_suite_name}")
+    logging.info("Task suite: %s", args.task_suite_name)
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
@@ -74,7 +120,7 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
-    client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
+    client = SubtaskWebsocketClient(args.host, args.port)
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -91,11 +137,12 @@ def eval_libero(args: Args) -> None:
         # Start episodes
         task_episodes, task_successes = 0, 0
         for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
-            logging.info(f"\nTask: {task_description}")
+            logging.info("\nTask: %s", task_description)
 
             # Reset environment
             env.reset()
             action_plan = collections.deque()
+            current_subtask = ""
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
@@ -104,7 +151,7 @@ def eval_libero(args: Args) -> None:
             t = 0
             replay_images = []
 
-            logging.info(f"Starting episode {task_episodes + 1}...")
+            logging.info("Starting episode %d...", task_episodes + 1)
             while t < max_steps + args.num_steps_wait:
                 try:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
@@ -130,23 +177,47 @@ def eval_libero(args: Args) -> None:
 
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
-                        # Prepare observations dict
-                        element = {
-                            "images.agentview_rgb": img,
-                            "images.wrist_rgb_left": wrist_img,
-                            "state": np.concatenate(
-                                (
-                                    obs["robot0_eef_pos"],
-                                    _quat2axisangle(obs["robot0_eef_quat"]),
-                                    obs["robot0_gripper_qpos"],
-                                )
-                            ),
-                            "task": str(task_description),
-                            "subtask": str(task_description),
+                        state = np.concatenate(
+                            (
+                                obs["robot0_eef_pos"],
+                                _quat2axisangle(obs["robot0_eef_quat"]),
+                                obs["robot0_gripper_qpos"],
+                            )
+                        )
+                        images = {
+                            "base_0_rgb": img,
+                            "left_wrist_0_rgb": wrist_img,
+                            "right_wrist_0_rgb": np.zeros_like(img),
                         }
 
-                        # Query model to get action
-                        action_chunk = client.infer(element)["actions"]
+                        # Generate subtask from high-level instruction.
+                        subtask_response = client.infer(
+                            images=images,
+                            high_level_prompt=str(task_description),
+                            low_level_prompt=current_subtask,
+                            state=state,
+                            generate_subtask=True,
+                            max_decoding_steps=args.max_decoding_steps,
+                            temperature=args.temperature,
+                        )
+                        if subtask_response.get("subtask"):
+                            current_subtask = subtask_response["subtask"]
+                        logging.info("Subtask: %s", current_subtask)
+
+                        # Query model to get action chunk.
+                        action_response = client.infer(
+                            images=images,
+                            high_level_prompt=str(task_description),
+                            low_level_prompt=current_subtask,
+                            state=state,
+                            generate_subtask=False,
+                            max_decoding_steps=args.max_decoding_steps,
+                            temperature=args.temperature,
+                        )
+                        action_chunk = action_response.get("actions")
+                        if action_chunk is None:
+                            raise RuntimeError("No actions returned from server.")
+                        action_chunk = np.asarray(action_chunk)
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
@@ -163,7 +234,7 @@ def eval_libero(args: Args) -> None:
                     t += 1
 
                 except Exception as e:
-                    logging.error(f"Caught exception: {e}")
+                    logging.error("Caught exception: %s", e)
                     break
 
             task_episodes += 1
@@ -179,16 +250,17 @@ def eval_libero(args: Args) -> None:
             )
 
             # Log current results
-            logging.info(f"Success: {done}")
-            logging.info(f"# episodes completed so far: {total_episodes}")
-            logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            logging.info("Success: %s", done)
+            logging.info("# episodes completed so far: %d", total_episodes)
+            logging.info("# successes: %d (%.1f%%)", total_successes, total_successes / total_episodes * 100.0)
 
         # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        logging.info("Current task success rate: %f", float(task_successes) / float(task_episodes))
+        logging.info("Current total success rate: %f", float(total_successes) / float(total_episodes))
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
-    logging.info(f"Total episodes: {total_episodes}")
+    logging.info("Total success rate: %f", float(total_successes) / float(total_episodes))
+    logging.info("Total episodes: %d", total_episodes)
+    client.close()
 
 
 def _get_libero_env(task, resolution, seed):

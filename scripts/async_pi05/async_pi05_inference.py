@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import logging
 import os
 import time
@@ -15,6 +16,7 @@ from openpi.models.model import Observation
 from openpi.models.tokenizer import PaligemmaTokenizer
 import openpi.shared.nnx_utils as nnx_utils
 from openpi.training.config import get_config
+from openpi.training import weight_loaders
 
 # GPU memory optimization settings
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
@@ -32,9 +34,10 @@ logger = logging.getLogger(__name__)
 class AsyncPi05Inference:
     """异步 Pi0.5 推理服务器,支持 subtask generation"""
 
-    def __init__(self, config_name: str = "right_pi05_20", gpu_id: int = 1):
+    def __init__(self, config_name: str = "right_pi05_20", gpu_id: int = 1, checkpoint_path: str | None = None):
         self.config_name = config_name
         self.gpu_id = gpu_id
+        self.checkpoint_path = checkpoint_path
         self.model = None
         self.tokenizer = None
         self.jit_sample_low_level_task = None
@@ -47,7 +50,7 @@ class AsyncPi05Inference:
 
         # 设置 GPU
         # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        os.environ["OPENPI_DATA_HOME"] = "/root/.cache/openpi"
+        os.environ.setdefault("OPENPI_DATA_HOME", os.path.expanduser("~/.cache/openpi"))
 
     async def initialize(self):
         """异步初始化模型"""
@@ -58,6 +61,15 @@ class AsyncPi05Inference:
 
         # 初始化模型配置
         config = get_config(self.config_name)
+        if self.checkpoint_path is not None:
+            checkpoint_path = self.checkpoint_path
+            if os.path.isdir(checkpoint_path):
+                checkpoint_path = os.path.join(checkpoint_path, "params")
+            logging.info("Overriding checkpoint path: %s", checkpoint_path)
+            config = dataclasses.replace(
+                config,
+                weight_loader=weight_loaders.CheckpointWeightLoader(checkpoint_path),
+            )
         model_rng = jax.random.key(0)
 
         # 创建模型
@@ -110,6 +122,8 @@ class AsyncPi05Inference:
         high_level_prompt: str,
         low_level_prompt: str = "",
         state: np.ndarray | None = None,
+        *,
+        mask_subtask_tokens: bool = True,
     ) -> Observation:
         """准备观察数据"""
 
@@ -122,9 +136,14 @@ class AsyncPi05Inference:
         state = jnp.zeros((1, 32), dtype=jnp.float32) if state is None else jnp.array(state)[np.newaxis, :]
 
         # Tokenize prompts
-        tokenized_prompt, tokenized_prompt_mask, token_ar_mask, token_loss_mask = (
-            self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state)
-        )
+        (
+            tokenized_prompt,
+            tokenized_prompt_mask,
+            token_ar_mask,
+            token_loss_mask,
+            _subtask_region_mask,
+            _action_region_mask,
+        ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state)
         # 构建观察数据
         data = {
             "image": img_dict,
@@ -142,24 +161,25 @@ class AsyncPi05Inference:
             rng, observation, train=False, image_keys=list(observation.images.keys())
         )
 
-        # 根据 loss mask 设置低级别任务 tokens
-        loss_mask = jnp.array(observation.token_loss_mask)
-        new_tokenized_prompt = observation.tokenized_prompt.at[loss_mask].set(0)
-        new_tokenized_prompt_mask = observation.tokenized_prompt_mask.at[loss_mask].set(False)
+        if mask_subtask_tokens and observation.token_loss_mask is not None:
+            # 根据 loss mask 设置低级别任务 tokens
+            loss_mask = jnp.array(observation.token_loss_mask)
+            new_tokenized_prompt = observation.tokenized_prompt.at[loss_mask].set(0)
+            new_tokenized_prompt_mask = observation.tokenized_prompt_mask.at[loss_mask].set(False)
 
-        new_observation = _model.Observation(
-            images=observation.images,
-            image_masks=observation.image_masks,
-            state=observation.state,
-            tokenized_prompt=new_tokenized_prompt,
-            tokenized_prompt_mask=new_tokenized_prompt_mask,
-            token_ar_mask=observation.token_ar_mask,
-            token_loss_mask=observation.token_loss_mask,
-        )
+            new_observation = _model.Observation(
+                images=observation.images,
+                image_masks=observation.image_masks,
+                state=observation.state,
+                tokenized_prompt=new_tokenized_prompt,
+                tokenized_prompt_mask=new_tokenized_prompt_mask,
+                token_ar_mask=observation.token_ar_mask,
+                token_loss_mask=observation.token_loss_mask,
+            )
 
-        observation = _model.preprocess_observation(
-            None, new_observation, train=False, image_keys=list(observation.images.keys())
-        )
+            observation = _model.preprocess_observation(
+                None, new_observation, train=False, image_keys=list(observation.images.keys())
+            )
         return jax.tree.map(jax.device_put, observation)
 
     async def generate_subtask(
@@ -219,7 +239,9 @@ class AsyncPi05Inference:
         rng = jax.random.key(int(time.time() * 1000) % 2**32)
 
         # 准备观察数据
-        observation = self.prepare_observation(images, high_level_prompt, low_level_prompt, state)
+        observation = self.prepare_observation(
+            images, high_level_prompt, low_level_prompt, state, mask_subtask_tokens=generate_subtask
+        )
 
         results = {
             "state": np.array(observation.state[0]) if observation.state is not None else None,
@@ -305,7 +327,9 @@ class AsyncPi05Inference:
                 logger.info(f"当前 low_level_prompt: {current_low_prompt}")
 
                 # 准备新的观察数据,使用当前的 low_level_prompt
-                observation = self.prepare_observation(images, high_level_prompt, current_low_prompt, state)
+                observation = self.prepare_observation(
+                    images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=True
+                )
 
                 # 生成新的子任务
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
@@ -379,7 +403,9 @@ class AsyncPi05Inference:
                     current_low_prompt = self.current_low_prompt
 
                 # 准备观察数据(使用当前的low_level_prompt)
-                observation = self.prepare_observation(images, high_level_prompt, current_low_prompt, state)
+                observation = self.prepare_observation(
+                    images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=False
+                )
 
                 # 生成动作
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
