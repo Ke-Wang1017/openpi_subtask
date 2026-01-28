@@ -10,6 +10,12 @@ python scripts/async_pi05/async_pi05_websocket_server.py \
 ```
 
 ### Start the async LIBERO clint 
+First see the [LIBERO README](README.md) to setup the environment. Then run:
+```bash
+# Create virtual environment
+source examples/libero/.venv/bin/activate
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+```
 
 ```python
 python examples/libero/main_subtask.py --host 127.0.0.1 --port 8765

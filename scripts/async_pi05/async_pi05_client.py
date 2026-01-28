@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncPi05Client:
-    """异步 Pi0.5 推理客户端"""
+    """Asynchronous Pi0.5 inference client"""
 
     def __init__(self, host: str = "localhost", port: int = 8765):
         self.host = host
@@ -21,32 +21,32 @@ class AsyncPi05Client:
         self.server_metadata = None
 
     async def connect(self):
-        """连接到服务器"""
+        """Connect to server"""
         uri = f"ws://{self.host}:{self.port}"
-        logger.info(f"连接到服务器: {uri}")
+        logger.info(f"Connecting to server: {uri}")
 
         self.websocket = await websockets.connect(uri)
 
-        # 接收服务器元数据
+        # Receive server metadata
         metadata_message = await self.websocket.recv()
         self.server_metadata = json.loads(metadata_message)
-        logger.info(f"服务器元数据: {self.server_metadata}")
+        logger.info(f"Server metadata: {self.server_metadata}")
 
     async def disconnect(self):
-        """断开连接"""
+        """Disconnect"""
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
 
     def load_image(self, img_path: str) -> np.ndarray:
-        """加载图像"""
+        """Load image"""
         if not img_path:
-            # 创建随机图像作为 fallback
+            # Create random image as fallback
             return np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
 
         img = cv2.imread(img_path)
         if img is None:
-            logger.warning(f"无法加载图像: {img_path},使用随机图像")
+            logger.warning(f"Unable to load image: {img_path}, using random image")
             return np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
 
         return img
@@ -65,32 +65,32 @@ class AsyncPi05Client:
         subtask_refresh_interval: float | None = None,
     ) -> dict[str, Any]:
         """
-        发送推理请求
+        Send inference request
 
         Args:
-            images: 图像路径字典,键为图像类型,值为图像文件路径
-            high_level_prompt: 高级别任务描述
-            low_level_prompt: 低级别任务描述
-            state: 机器人状态
-            generate_subtask: 是否生成子任务
-            max_decoding_steps: 最大解码步数
-            temperature: 采样温度
-            noise: 动作噪声
-            subtask_refresh_interval: 子任务刷新间隔(秒),None表示不刷新
+            images: Image path dictionary, keys are image types, values are image file paths
+            high_level_prompt: High-level task description
+            low_level_prompt: Low-level task description
+            state: Robot state
+            generate_subtask: Whether to generate subtask
+            max_decoding_steps: Maximum decoding steps
+            temperature: Sampling temperature
+            noise: Action noise
+            subtask_refresh_interval: Subtask refresh interval (seconds), None means no refresh
 
         Returns:
-            推理结果字典
+            Inference result dictionary
         """
         if not self.websocket:
-            raise RuntimeError("未连接到服务器")
+            raise RuntimeError("Not connected to server")
 
-        # 加载图像
+        # Load images
         images_data = {}
         for key, img_path in images.items():
             img = self.load_image(img_path)
-            images_data[key] = img.tolist()  # 转换为列表以便 JSON 序列化
+            images_data[key] = img.tolist()  # Convert to list for JSON serialization
 
-        # 构建请求
+        # Build request
         request = {
             "images": images_data,
             "high_level_prompt": high_level_prompt,
@@ -109,48 +109,48 @@ class AsyncPi05Client:
         if subtask_refresh_interval is not None:
             request["subtask_refresh_interval"] = subtask_refresh_interval
 
-        # 发送请求
+        # Send request
         start_time = time.time()
         await self.websocket.send(json.dumps(request))
 
-        # 接收响应
+        # Receive response
         response_message = await self.websocket.recv()
         response = json.loads(response_message)
 
         total_time = time.time() - start_time
 
         if response.get("status") == "error":
-            raise RuntimeError(f"服务器错误: {response.get('error')}")
+            raise RuntimeError(f"Server error: {response.get('error')}")
 
-        # 添加客户端时序信息
+        # Add client timing information
         response["client_timing"] = {"total_ms": total_time * 1000}
 
         return response
 
     async def batch_infer(self, requests: list, delay_between_requests: float = 0.1) -> list:
-        """批量推理请求"""
+        """Batch inference requests"""
         results = []
 
         for i, request in enumerate(requests):
-            logger.info(f"处理请求 {i + 1}/{len(requests)}")
+            logger.info(f"Processing request {i + 1}/{len(requests)}")
 
             try:
                 result = await self.infer(**request)
                 results.append(result)
 
-                if i < len(requests) - 1:  # 不是最后一个请求
+                if i < len(requests) - 1:  # Not the last request
                     await asyncio.sleep(delay_between_requests)
 
             except Exception as e:
-                logger.error(f"请求 {i + 1} 失败: {e}")
+                logger.error(f"Request {i + 1} failed: {e}")
                 results.append({"error": str(e)})
 
         return results
 
     async def listen_for_refresh_messages(self, callback=None):
-        """监听定期刷新消息"""
+        """Listen for periodic refresh messages"""
         if not self.websocket:
-            raise RuntimeError("未连接到服务器")
+            raise RuntimeError("Not connected to server")
 
         try:
             while True:
@@ -158,68 +158,68 @@ class AsyncPi05Client:
                 data = json.loads(message)
 
                 if data.get("type") == "subtask_refresh":
-                    logger.info(f"收到子任务刷新: {data['subtask']} (第{data['refresh_count']}次)")
+                    logger.info(f"Received subtask refresh: {data['subtask']} (count: {data['refresh_count']})")
 
                     if callback:
                         await callback(data)
                 else:
-                    # 处理其他类型的消息
-                    logger.info(f"收到消息: {data}")
+                    # Handle other types of messages
+                    logger.info(f"Received message: {data}")
 
         except websockets.exceptions.ConnectionClosed:
-            logger.info("连接已关闭,停止监听刷新消息")
+            logger.info("Connection closed, stopping refresh message listener")
         except Exception as e:
-            logger.error(f"监听刷新消息时出错: {e}")
+            logger.error(f"Error listening for refresh messages: {e}")
 
 
 async def test_single_inference():
-    """测试单个推理请求"""
+    """Test single inference request"""
     client = AsyncPi05Client(host="localhost", port=8765)
 
     try:
         await client.connect()
 
-        # 准备测试数据
+        # Prepare test data
         images = {"base_0_rgb": "faceImg.png", "left_wrist_0_rgb": "leftImg.png", "right_wrist_0_rgb": "rightImg.png"}
 
         high_level_prompt = "Pick up the flashcard on the table"
 
-        # 执行推理
-        logger.info("开始推理...")
+        # Execute inference
+        logger.info("Starting inference...")
         result = await client.infer(
             images=images,
             high_level_prompt=high_level_prompt,
             generate_subtask=True,
             max_decoding_steps=25,
             temperature=0.1,
-            subtask_refresh_interval=2.0,  # 每2秒刷新一次子任务
+            subtask_refresh_interval=2.0,  # Refresh subtask every 2 seconds
         )
 
-        # 打印结果
-        print("推理结果:")
-        print(f"状态: {result.get('status')}")
+        # Print results
+        print("Inference results:")
+        print(f"Status: {result.get('status')}")
         if result.get("actions") is not None:
-            print(f"动作形状: {np.array(result['actions']).shape}")
+            print(f"Action shape: {np.array(result['actions']).shape}")
         else:
-            print("动作形状: None")
-        print(f"生成的子任务: {result.get('subtask')}")
-        print(f"时序信息: {result.get('timing')}")
-        print(f"客户端时序: {result.get('client_timing')}")
+            print("Action shape: None")
+        print(f"Generated subtask: {result.get('subtask')}")
+        print(f"Timing info: {result.get('timing')}")
+        print(f"Client timing: {result.get('client_timing')}")
 
     except Exception as e:
-        logger.error(f"测试失败: {e}")
+        logger.error(f"Test failed: {e}")
     finally:
         await client.disconnect()
 
 
 async def test_batch_inference():
-    """测试批量推理请求"""
+    """Test batch inference requests"""
     client = AsyncPi05Client(host="localhost", port=8765)
 
     try:
         await client.connect()
 
-        # 准备批量请求
+        # Prepare batch requests
         requests = [
             {
                 "images": {
@@ -241,110 +241,110 @@ async def test_batch_inference():
             },
         ]
 
-        # 执行批量推理
-        logger.info("开始批量推理...")
+        # Execute batch inference
+        logger.info("Starting batch inference...")
         results = await client.batch_infer(requests, delay_between_requests=0.5)
 
-        # 打印结果
-        print(f"批量推理完成,处理了 {len(results)} 个请求")
+        # Print results
+        print(f"Batch inference completed, processed {len(results)} requests")
         for i, result in enumerate(results):
             if "error" in result:
-                print(f"请求 {i + 1} 失败: {result['error']}")
+                print(f"Request {i + 1} failed: {result['error']}")
             else:
-                print(f"请求 {i + 1} 成功:")
-                print(f"  子任务: {result.get('subtask')}")
+                print(f"Request {i + 1} succeeded:")
+                print(f"  Subtask: {result.get('subtask')}")
                 if result.get("actions") is not None:
-                    print(f"  动作形状: {np.array(result['actions']).shape}")
+                    print(f"  Action shape: {np.array(result['actions']).shape}")
                 else:
-                    print("  动作形状: None")
+                    print("  Action shape: None")
 
     except Exception as e:
-        logger.error(f"批量测试失败: {e}")
+        logger.error(f"Batch test failed: {e}")
     finally:
         await client.disconnect()
 
 
 async def test_periodic_refresh():
-    """测试定期刷新功能"""
+    """Test periodic refresh functionality"""
     client = AsyncPi05Client(host="localhost", port=8765)
 
     try:
         await client.connect()
 
-        # 准备测试数据
+        # Prepare test data
         images = {"base_0_rgb": "faceImg.png", "left_wrist_0_rgb": "leftImg.png", "right_wrist_0_rgb": "rightImg.png"}
 
         high_level_prompt = "Pick up the flashcard on the table"
 
-        # 定义刷新回调函数
+        # Define refresh callback function
         async def on_refresh(data):
-            print(f"\n🔄 子任务刷新 (第{data['refresh_count']}次):")
-            print(f"   新子任务: {data['subtask']}")
-            print(f"   时间戳: {data['timestamp']}")
+            print(f"\n🔄 Subtask refresh (count: {data['refresh_count']}):")
+            print(f"   New subtask: {data['subtask']}")
+            print(f"   Timestamp: {data['timestamp']}")
             print("-" * 50)
 
-        # 启动监听任务
+        # Start listening task
         listen_task = asyncio.create_task(client.listen_for_refresh_messages(callback=on_refresh))
 
-        # 执行推理并启用定期刷新
-        logger.info("开始推理并启用定期刷新...")
+        # Execute inference and enable periodic refresh
+        logger.info("Starting inference and enabling periodic refresh...")
         result = await client.infer(
             images=images,
             high_level_prompt=high_level_prompt,
             generate_subtask=True,
-            subtask_refresh_interval=2.0,  # 每2秒刷新一次
+            subtask_refresh_interval=2.0,  # Refresh every 2 seconds
         )
 
-        print("初始推理结果:")
-        print(f"状态: {result.get('status')}")
+        print("Initial inference results:")
+        print(f"Status: {result.get('status')}")
         if result.get("actions") is not None:
-            print(f"动作形状: {np.array(result['actions']).shape}")
+            print(f"Action shape: {np.array(result['actions']).shape}")
         else:
-            print("动作形状: None")
-        print(f"初始子任务: {result.get('subtask')}")
-        print(f"定期刷新已启用: {result.get('subtask_refresh_enabled')}")
-        print(f"刷新间隔: {result.get('subtask_refresh_interval')}秒")
-        print("\n等待定期刷新消息... (按 Ctrl+C 停止)")
+            print("Action shape: None")
+        print(f"Initial subtask: {result.get('subtask')}")
+        print(f"Periodic refresh enabled: {result.get('subtask_refresh_enabled')}")
+        print(f"Refresh interval: {result.get('subtask_refresh_interval')} seconds")
+        print("\nWaiting for periodic refresh messages... (Press Ctrl+C to stop)")
 
-        # 等待一段时间来观察刷新
+        # Wait for a period to observe refresh
         try:
-            await asyncio.wait_for(listen_task, timeout=10.0)  # 等待10秒
+            await asyncio.wait_for(listen_task, timeout=10.0)  # Wait 10 seconds
         except TimeoutError:
-            print("测试完成,已观察10秒的刷新过程")
+            print("Test completed, observed 10 seconds of refresh process")
 
     except KeyboardInterrupt:
-        print("\n用户中断测试")
+        print("\nUser interrupted test")
     except Exception as e:
-        logger.error(f"定期刷新测试失败: {e}")
+        logger.error(f"Periodic refresh test failed: {e}")
     finally:
         listen_task.cancel()
         await client.disconnect()
 
 
 async def main():
-    """主函数"""
-    # 设置日志
+    """Main function"""
+    # Setup logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    print("异步 Pi0.5 推理客户端测试")
+    print("Asynchronous Pi0.5 inference client test")
     print("=" * 50)
 
-    # 测试单个推理
-    print("\n1. 测试单个推理请求")
+    # Test single inference
+    print("\n1. Test single inference request")
     await test_single_inference()
 
-    # 等待一下
+    # Wait a bit
     await asyncio.sleep(2)
 
-    # 测试定期刷新
-    print("\n2. 测试定期刷新功能")
+    # Test periodic refresh
+    print("\n2. Test periodic refresh functionality")
     await test_periodic_refresh()
 
-    # 等待一下
+    # Wait a bit
     await asyncio.sleep(2)
 
-    # 测试批量推理
-    print("\n3. 测试批量推理请求")
+    # Test batch inference
+    print("\n3. Test batch inference requests")
     await test_batch_inference()
 
 

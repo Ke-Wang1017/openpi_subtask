@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncPi05Inference:
-    """异步 Pi0.5 推理服务器,支持 subtask generation"""
+    """Asynchronous Pi0.5 inference server, supports subtask generation"""
 
     def __init__(self, config_name: str = "right_pi05_20", gpu_id: int = 1, checkpoint_path: str | None = None):
         self.config_name = config_name
@@ -44,22 +44,22 @@ class AsyncPi05Inference:
         self.jit_sample_actions = None
         self._initialized = False
 
-        # 共享状态
+        # Shared state
         self.current_low_prompt = None
         self.low_prompt_lock = asyncio.Lock()
 
-        # 设置 GPU
+        # Setup GPU
         # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         os.environ.setdefault("OPENPI_DATA_HOME", os.path.expanduser("~/.cache/openpi"))
 
     async def initialize(self):
-        """异步初始化模型"""
+        """Asynchronously initialize model"""
         if self._initialized:
             return
 
-        logger.info("开始初始化 Pi0.5 模型...")
+        logger.info("Starting Pi0.5 model initialization...")
 
-        # 初始化模型配置
+        # Initialize model config
         config = get_config(self.config_name)
         if self.checkpoint_path is not None:
             checkpoint_path = self.checkpoint_path
@@ -72,48 +72,48 @@ class AsyncPi05Inference:
             )
         model_rng = jax.random.key(0)
 
-        # 创建模型
+        # Create model
         self.model = config.model.create(model_rng)
 
-        # 加载预训练参数
+        # Load pretrained parameters
         graphdef, state = nnx.split(self.model)
         loader = config.weight_loader
         params = nnx.state(self.model)
 
-        # 转换参数为 bfloat16
+        # Convert parameters to bfloat16
         params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
 
-        # 加载参数
+        # Load parameters
         params_shape = params.to_pure_dict()
         loaded_params = loader.load(params_shape)
         state.replace_by_pure_dict(loaded_params)
         self.model = nnx.merge(graphdef, state)
 
-        # 初始化 tokenizer
+        # Initialize tokenizer
         self.tokenizer = PaligemmaTokenizer(max_len=256)
 
-        # JIT 编译关键函数
+        # JIT compile key functions
         self.jit_sample_low_level_task = nnx_utils.module_jit(self.model.sample_low_level_task, static_argnums=(3,))
         self.jit_sample_actions = nnx_utils.module_jit(self.model.sample_actions)
 
         self._initialized = True
-        logger.info("Pi0.5 模型初始化完成")
+        logger.info("Pi0.5 model initialization completed")
 
     def create_random_image(self, height: int = 224, width: int = 224) -> np.ndarray:
         """创建随机图像作为 fallback"""
         return np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
 
     def load_image_with_fallback(self, img_path: str, img_name: str) -> np.ndarray:
-        """加载图像,支持 fallback 到随机图像"""
+        """Load image, supports fallback to random image"""
         if not os.path.exists(img_path):
-            logger.warning(f"图像文件不存在: {img_path},使用随机图像: {img_name}")
+            logger.warning(f"Image file does not exist: {img_path}, using random image: {img_name}")
             return self.create_random_image()
 
         img = cv2.imread(img_path)
         if img is not None:
-            logger.info(f"成功加载图像: {img_name}, 形状: {img.shape}")
+            logger.info(f"Successfully loaded image: {img_name}, shape: {img.shape}")
             return img
-        logger.warning(f"无法读取图像: {img_name},使用随机图像")
+        logger.warning(f"Unable to read image: {img_name}, using random image")
         return self.create_random_image()
 
     def prepare_observation(
@@ -125,14 +125,14 @@ class AsyncPi05Inference:
         *,
         mask_subtask_tokens: bool = True,
     ) -> Observation:
-        """准备观察数据"""
+        """Prepare observation data"""
 
-        # 转换图像到模型期望的格式 [-1, 1]
+        # Convert images to model expected format [-1, 1]
         img_dict = {}
         for key, img in images.items():
             img_dict[key] = jnp.array(img[np.newaxis, :, :, :]).astype(jnp.float32)
 
-        # 准备状态数据
+        # Prepare state data
         state = jnp.zeros((1, 32), dtype=jnp.float32) if state is None else jnp.array(state)[np.newaxis, :]
 
         # Tokenize prompts
@@ -144,7 +144,7 @@ class AsyncPi05Inference:
             _subtask_region_mask,
             _action_region_mask,
         ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state)
-        # 构建观察数据
+        # Build observation data
         data = {
             "image": img_dict,
             "image_mask": {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict},
@@ -162,7 +162,7 @@ class AsyncPi05Inference:
         )
 
         if mask_subtask_tokens and observation.token_loss_mask is not None:
-            # 根据 loss mask 设置低级别任务 tokens
+            # Set low-level task tokens based on loss mask
             loss_mask = jnp.array(observation.token_loss_mask)
             new_tokenized_prompt = observation.tokenized_prompt.at[loss_mask].set(0)
             new_tokenized_prompt_mask = observation.tokenized_prompt_mask.at[loss_mask].set(False)
@@ -185,20 +185,20 @@ class AsyncPi05Inference:
     async def generate_subtask(
         self, observation: Observation, rng: jax.Array, max_decoding_steps: int = 200, temperature: float = 0.1
     ) -> tuple[jnp.ndarray, str]:
-        """生成子任务"""
+        """Generate subtask"""
         start_time = time.time()
 
-        # 生成子任务 tokens
+        # Generate subtask tokens
         predicted_token, _kv_cache, _mask, _ar_mask = self.jit_sample_low_level_task(
             rng, observation, max_decoding_steps, PALIGEMMA_EOS_TOKEN, temperature
         )
 
-        # 解码生成的子任务
+        # Decode generated subtask
         subtask_text = self.tokenizer.detokenize(np.array(predicted_token[0], dtype=np.int32))
 
         generation_time = time.time() - start_time
-        logger.info(f"子任务生成耗时: {generation_time:.3f}s")
-        logger.info(f"生成的子任务: {subtask_text}")
+        logger.info(f"Subtask generation time: {generation_time:.3f}s")
+        logger.info(f"Generated subtask: {subtask_text}")
 
         return predicted_token, subtask_text
 
@@ -216,21 +216,21 @@ class AsyncPi05Inference:
         subtask_refresh_interval: float | None = None,
     ) -> dict[str, Any]:
         """
-        异步推理函数,支持子任务生成和定期刷新
+        Asynchronous inference function, supports subtask generation and periodic refresh
 
         Args:
-            images: 图像字典,键为图像类型,值为图像数组
-            high_level_prompt: 高级别任务描述
-            low_level_prompt: 低级别任务描述(可选)
-            state: 机器人状态
-            generate_subtask: 是否生成子任务(如果为True,则不生成动作,动作由持续生成功能处理)
-            max_decoding_steps: 最大解码步数
-            temperature: 采样温度
-            noise: 动作噪声(可选,仅在generate_subtask=False时使用)
-            subtask_refresh_interval: 子任务刷新间隔(秒),None表示不刷新
+            images: Image dictionary, keys are image types, values are image arrays
+            high_level_prompt: High-level task description
+            low_level_prompt: Low-level task description (optional)
+            state: Robot state
+            generate_subtask: Whether to generate subtask (if True, actions are not generated, actions are handled by continuous generation)
+            max_decoding_steps: Maximum decoding steps
+            temperature: Sampling temperature
+            noise: Action noise (optional, only used when generate_subtask=False)
+            subtask_refresh_interval: Subtask refresh interval (seconds), None means no refresh
 
         Returns:
-            包含子任务和时序信息的字典(动作由持续生成功能处理)
+            Dictionary containing subtask and timing information (actions are handled by continuous generation)
         """
         if not self._initialized:
             await self.initialize()
@@ -238,7 +238,7 @@ class AsyncPi05Inference:
         start_time = time.time()
         rng = jax.random.key(int(time.time() * 1000) % 2**32)
 
-        # 准备观察数据
+        # Prepare observation data
         observation = self.prepare_observation(
             images, high_level_prompt, low_level_prompt, state, mask_subtask_tokens=generate_subtask
         )
@@ -251,7 +251,7 @@ class AsyncPi05Inference:
             "timing": {},
         }
 
-        # 生成子任务(如果需要)
+        # Generate subtask (if needed)
         if generate_subtask:
             subtask_tokens, subtask_text = await self.generate_subtask(
                 observation, rng, max_decoding_steps, temperature
@@ -259,9 +259,9 @@ class AsyncPi05Inference:
             results["subtask"] = subtask_text
             results["subtask_tokens"] = np.array(subtask_tokens[0])
 
-        # 如果不需要生成动作,则跳过动作生成
+        # If action generation is not needed, skip action generation
         if not generate_subtask:
-            # 只生成动作,不生成子任务
+            # Only generate actions, do not generate subtask
             action_start_time = time.time()
             if noise is not None:
                 noise = jnp.array(noise)[np.newaxis, ...] if noise.ndim == 2 else jnp.array(noise)
@@ -270,16 +270,18 @@ class AsyncPi05Inference:
                 sampled_actions = self.jit_sample_actions(rng, observation)
 
             action_time = time.time() - action_start_time
-            results["actions"] = np.array(sampled_actions[0])
+            # sampled_actions is (x_0, output_tokens) where x_0 has shape (batch, horizon, dim)
+            # Extract first batch: x_0[0] gives shape (horizon, dim)
+            results["actions"] = np.array(sampled_actions[0][0])
 
             total_time = time.time() - start_time
             results["timing"] = {"total_ms": total_time * 1000, "action_ms": action_time * 1000, "subtask_ms": 0}
         else:
-            # 只生成子任务,不生成动作(动作由持续生成功能处理)
+            # Only generate subtask, do not generate actions (actions are handled by continuous generation)
             total_time = time.time() - start_time
             results["timing"] = {"total_ms": total_time * 1000, "action_ms": 0, "subtask_ms": total_time * 1000}
 
-        # 如果设置了刷新间隔,启动定期刷新任务
+        # If refresh interval is set, start periodic refresh task
         if subtask_refresh_interval is not None and subtask_refresh_interval > 0:
             results["subtask_refresh_interval"] = subtask_refresh_interval
             results["subtask_refresh_task"] = asyncio.create_task(
@@ -294,7 +296,7 @@ class AsyncPi05Inference:
                 )
             )
 
-        logger.info(f"推理完成,总耗时: {total_time:.3f}s")
+        logger.info(f"Inference completed, total time: {total_time:.3f}s")
         return results
 
     async def _periodic_subtask_refresh(
@@ -307,10 +309,10 @@ class AsyncPi05Inference:
         max_decoding_steps: int,
         temperature: float,
     ):
-        """定期刷新子任务的后台任务"""
+        """Background task for periodic subtask refresh"""
         refresh_count = 0
 
-        # 初始化共享状态
+        # Initialize shared state
         async with self.low_prompt_lock:
             self.current_low_prompt = low_level_prompt
 
@@ -319,47 +321,47 @@ class AsyncPi05Inference:
                 await asyncio.sleep(refresh_interval)
                 refresh_count += 1
 
-                # 获取当前的 low_level_prompt
+                # Get current low_level_prompt
                 async with self.low_prompt_lock:
                     current_low_prompt = self.current_low_prompt
 
-                logger.info(f"开始第 {refresh_count} 次子任务刷新...")
-                logger.info(f"当前 low_level_prompt: {current_low_prompt}")
+                logger.info(f"Starting {refresh_count}th subtask refresh...")
+                logger.info(f"Current low_level_prompt: {current_low_prompt}")
 
-                # 准备新的观察数据,使用当前的 low_level_prompt
+                # Prepare new observation data, using current low_level_prompt
                 observation = self.prepare_observation(
                     images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=True
                 )
 
-                # 生成新的子任务
+                # Generate new subtask
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
                 subtask_tokens, subtask_text = await self.generate_subtask(
                     observation, rng, max_decoding_steps, temperature
                 )
 
-                logger.info(f"第 {refresh_count} 次刷新完成,新子任务: {subtask_text}")
+                logger.info(f"{refresh_count}th refresh completed, new subtask: {subtask_text}")
 
-                # 更新共享的 low_level_prompt
+                # Update shared low_level_prompt
                 async with self.low_prompt_lock:
                     self.current_low_prompt = subtask_text
 
-                logger.info(f"更新 low_level_prompt: {subtask_text}")
+                logger.info(f"Updated low_level_prompt: {subtask_text}")
 
-                # 回调函数处理新的子任务(不生成动作)
+                # Callback function to handle new subtask (do not generate actions)
                 await self._on_subtask_refresh(
                     subtask_text,
                     subtask_tokens,
                     refresh_count,
                     subtask_text,
-                    None,  # 不传递动作
+                    None,  # Do not pass actions
                 )
 
             except asyncio.CancelledError:
-                logger.info("子任务刷新任务被取消")
+                logger.info("Subtask refresh task cancelled")
                 break
             except Exception as e:
-                logger.error(f"子任务刷新出错: {e}")
-                await asyncio.sleep(1)  # 出错后等待1秒再重试
+                logger.error(f"Error in subtask refresh: {e}")
+                await asyncio.sleep(1)  # Wait 1 second before retrying after error
 
     async def _on_subtask_refresh(
         self,
@@ -369,15 +371,15 @@ class AsyncPi05Inference:
         updated_low_prompt: str,
         updated_actions: jnp.ndarray,
     ):
-        """子任务刷新回调函数,可以被子类重写"""
-        # 默认实现:只记录日志
-        logger.info(f"子任务已刷新 (第{refresh_count}次): {subtask_text}")
-        logger.info(f"更新后的 low_level_prompt: {updated_low_prompt}")
+        """Subtask refresh callback function, can be overridden by subclasses"""
+        # Default implementation: only log
+        logger.info(f"Subtask refreshed (count: {refresh_count}): {subtask_text}")
+        logger.info(f"Updated low_level_prompt: {updated_low_prompt}")
         if updated_actions is not None:
-            logger.info(f"基于新 subtask 的动作形状: {np.array(updated_actions[0]).shape}")
+            logger.info(f"Action shape based on new subtask: {np.array(updated_actions[0]).shape}")
 
-        # 子类可以重写此方法来处理新的子任务和动作
-        # 例如:发送WebSocket消息、更新数据库、执行动作等
+        # Subclasses can override this method to handle new subtasks and actions
+        # For example: send WebSocket messages, update database, execute actions, etc.
 
     async def start_continuous_action_generation(
         self,
@@ -388,63 +390,63 @@ class AsyncPi05Inference:
         action_interval: float = 0.5,
         max_actions: int = 100,
     ):
-        """持续生成动作序列"""
+        """Continuously generate action sequences"""
         action_count = 0
 
-        logger.info(f"开始持续动作生成,间隔: {action_interval}s,最大动作数: {max_actions}")
+        logger.info(f"Starting continuous action generation, interval: {action_interval}s, max actions: {max_actions}")
 
         while action_count < max_actions:
             try:
                 await asyncio.sleep(action_interval)
                 action_count += 1
 
-                # 获取当前的 low_level_prompt(线程安全)
+                # Get current low_level_prompt (thread-safe)
                 async with self.low_prompt_lock:
                     current_low_prompt = self.current_low_prompt
 
-                # 准备观察数据(使用当前的low_level_prompt)
+                # Prepare observation data (using current low_level_prompt)
                 observation = self.prepare_observation(
                     images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=False
                 )
 
-                # 生成动作
+                # Generate actions
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
                 actions = self.jit_sample_actions(rng, observation)
 
-                logger.info(f"生成第 {action_count} 个动作序列,形状: {np.array(actions[0]).shape}")
-                logger.info(f"当前 low_level_prompt: {current_low_prompt}")
+                logger.info(f"Generated {action_count}th action sequence, shape: {np.array(actions[0]).shape}")
+                logger.info(f"Current low_level_prompt: {current_low_prompt}")
 
-                # 回调处理动作
+                # Callback to handle actions
                 await self._on_action_generated(actions, action_count, current_low_prompt)
 
             except asyncio.CancelledError:
-                logger.info("持续动作生成被取消")
+                logger.info("Continuous action generation cancelled")
                 break
             except Exception as e:
-                logger.error(f"动作生成出错: {e}")
+                logger.error(f"Error in action generation: {e}")
                 await asyncio.sleep(1)
 
     async def _on_action_generated(self, actions: jnp.ndarray, action_count: int, current_low_prompt: str):
-        """动作生成回调函数,可以被子类重写"""
-        logger.info(f"第 {action_count} 个动作序列已生成")
-        # 子类可以重写此方法来处理生成的动作
-        # 例如:发送到机器人执行、保存到文件等
+        """Action generation callback function, can be overridden by subclasses"""
+        logger.info(f"{action_count}th action sequence generated")
+        # Subclasses can override this method to handle generated actions
+        # For example: send to robot for execution, save to file, etc.
 
 
 async def main():
-    """测试异步推理服务器"""
-    # 设置日志
+    """Test asynchronous inference server"""
+    # Setup logging
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # 确保模块日志记录器也显示日志
+    # Ensure module logger also displays logs
     logger.setLevel(logging.INFO)
 
-    # 创建推理服务器
+    # Create inference server
     inference_server = AsyncPi05Inference(config_name="right_pi05_20", gpu_id=1)
 
-    # 准备测试图像
+    # Prepare test images
     img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]
     images = {}
 
@@ -454,11 +456,11 @@ async def main():
         key = ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"][i]
         images[key] = img
 
-    # 测试推理
+    # Test inference
     high_level_prompt = "Pick up the flashcard on the table"
     low_level_prompt = ""
 
-    print("开始异步推理测试...")
+    print("Starting asynchronous inference test...")
     results = await inference_server.infer(
         images=images,
         high_level_prompt=high_level_prompt,
@@ -466,38 +468,38 @@ async def main():
         generate_subtask=True,
         max_decoding_steps=200,
         temperature=0.1,
-        subtask_refresh_interval=2.0,  # 每2秒刷新一次
+        subtask_refresh_interval=2.0,  # Refresh every 2 seconds
     )
 
-    print("推理结果:")
+    print("Inference results:")
     if results["actions"] is not None:
-        print(f"生成的动作形状: {results['actions'].shape}")
-    print(f"生成的子任务: {results['subtask']}")
-    print(f"时序信息: {results['timing']}")
+        print(f"Generated action shape: {results['actions'].shape}")
+    print(f"Generated subtask: {results['subtask']}")
+    print(f"Timing info: {results['timing']}")
 
-    # 启动持续动作生成(与subtask刷新并行)
-    print("启动持续动作生成...")
+    # Start continuous action generation (parallel with subtask refresh)
+    print("Starting continuous action generation...")
     action_task = asyncio.create_task(
         inference_server.start_continuous_action_generation(
             images=images,
             high_level_prompt=high_level_prompt,
             low_level_prompt=low_level_prompt,
-            action_interval=0.5,  # 每0.5秒生成一个动作
+            action_interval=0.5,  # Generate one action every 0.5 seconds
             max_actions=20,
         )
     )
 
-    # 等待两个任务运行一段时间
-    print("等待子任务刷新和动作生成...")
-    await asyncio.sleep(10000000000000000000000000)  # 等待10秒,观察两个过程
+    # Wait for both tasks to run for a period
+    print("Waiting for subtask refresh and action generation...")
+    await asyncio.sleep(10000000000000000000000000)  # Wait 10 seconds, observe both processes
 
-    # 取消所有任务
+    # Cancel all tasks
     if "subtask_refresh_task" in results:
         results["subtask_refresh_task"].cancel()
-        print("已取消子任务刷新任务")
+        print("Cancelled subtask refresh task")
 
     action_task.cancel()
-    print("已取消持续动作生成任务")
+    print("Cancelled continuous action generation task")
 
 
 if __name__ == "__main__":

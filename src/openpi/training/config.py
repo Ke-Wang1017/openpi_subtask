@@ -635,7 +635,6 @@ _CONFIGS = [
         exp_name="libero_pi05_subtask_flow",
         model=pi05_config.Pi05Config(
             action_horizon=10,
-            
             max_token_len=256,
             discrete_state_input=False,
             # ⭐ Only use subtask and flow matching loss

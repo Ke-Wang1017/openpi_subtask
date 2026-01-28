@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncPi05WebSocketServer:
-    """基于 WebSocket 的异步 Pi0.5 推理服务器"""
+    """Asynchronous Pi0.5 inference server based on WebSocket"""
 
     def __init__(
         self,
@@ -33,32 +33,32 @@ class AsyncPi05WebSocketServer:
             checkpoint_path=checkpoint_path,
         )
         self.clients = set()
-        self.active_refresh_tasks = {}  # 存储活跃的刷新任务
+        self.active_refresh_tasks = {}  # store active refresh tasks
 
     async def register_client(self, websocket: WebSocketServerProtocol):
-        """注册新客户端"""
+        """Register new client"""
         self.clients.add(websocket)
-        logger.info(f"客户端连接: {websocket.remote_address}")
+        logger.info(f"Client connected: {websocket.remote_address}")
 
     async def unregister_client(self, websocket: WebSocketServerProtocol):
-        """注销客户端"""
+        """Unregister client"""
         self.clients.discard(websocket)
 
-        # 取消该客户端的刷新任务
+        # Cancel the refresh task for this client
         if websocket in self.active_refresh_tasks:
             task = self.active_refresh_tasks[websocket]
             task.cancel()
             del self.active_refresh_tasks[websocket]
-            logger.info(f"已取消客户端 {websocket.remote_address} 的刷新任务")
+            logger.info(f"Cancelled refresh task for client {websocket.remote_address}")
 
-        logger.info(f"客户端断开: {websocket.remote_address}")
+        logger.info(f"Client disconnected: {websocket.remote_address}")
 
     async def handle_client(self, websocket: WebSocketServerProtocol, path: str | None = None):
-        """处理客户端连接"""
+        """Handle client connection"""
         await self.register_client(websocket)
 
         try:
-            # 发送服务器元数据
+            # Send server metadata
             metadata = {
                 "server_type": "AsyncPi05Inference",
                 "version": "1.0.0",
@@ -70,11 +70,11 @@ class AsyncPi05WebSocketServer:
 
             async for message in websocket:
                 try:
-                    # 解析请求
+                    # Parse request
                     request = json.loads(message)
                     response = await self.process_request(request, websocket)
 
-                    # 发送响应
+                    # Send response
                     await websocket.send(json.dumps(response))
 
                 except json.JSONDecodeError:
@@ -82,25 +82,25 @@ class AsyncPi05WebSocketServer:
                     await websocket.send(json.dumps(error_response))
 
                 except Exception as e:
-                    logger.error(f"处理请求时出错: {e}")
+                    logger.error(f"Error processing request: {e}")
                     error_response = {"error": str(e), "status": "error"}
                     await websocket.send(json.dumps(error_response))
 
         except websockets.exceptions.ConnectionClosed:
-            logger.info(f"客户端连接关闭: {websocket.remote_address}")
+            logger.info(f"Client connection closed: {websocket.remote_address}")
         except Exception as e:
-            logger.error(f"处理客户端时出错: {e}")
+            logger.error(f"Error handling client: {e}")
         finally:
             await self.unregister_client(websocket)
 
     async def process_request(self, request: dict[str, Any], websocket: WebSocketServerProtocol) -> dict[str, Any]:
-        """处理推理请求"""
+        """Process inference request"""
         try:
-            # 验证请求格式
+            # Validate request format
             if "images" not in request or "high_level_prompt" not in request:
                 return {"error": "Missing required fields: images, high_level_prompt", "status": "error"}
 
-            # 提取请求参数
+            # Extract request parameters
             images_data = request["images"]
             high_level_prompt = request["high_level_prompt"]
             low_level_prompt = request.get("low_level_prompt", "ABCDEFG")
@@ -109,30 +109,30 @@ class AsyncPi05WebSocketServer:
             max_decoding_steps = request.get("max_decoding_steps", 25)
             temperature = request.get("temperature", 0.1)
             noise = request.get("noise")
-            subtask_refresh_interval = request.get("subtask_refresh_interval")  # 新增:子任务刷新间隔
+            subtask_refresh_interval = request.get("subtask_refresh_interval")  # New: subtask refresh interval
 
-            # 转换图像数据
+            # Convert image data
             images = {}
             for key, img_data in images_data.items():
                 if isinstance(img_data, list):
-                    # 假设是 [height, width, channels] 格式
+                    # Assume [height, width, channels] format
                     img_array = np.array(img_data, dtype=np.uint8)
                 else:
-                    # 假设已经是 numpy 数组
+                    # Assume already a numpy array
                     img_array = np.array(img_data, dtype=np.uint8)
                 images[key] = img_array
 
-            # 转换状态数据
+            # Convert state data
             state_array = None
             if state is not None:
                 state_array = np.array(state, dtype=np.float32)
 
-            # 转换噪声数据
+            # Convert noise data
             noise_array = None
             if noise is not None:
                 noise_array = np.array(noise, dtype=np.float32)
 
-            # 执行推理
+            # Execute inference
             start_time = time.time()
             results = await self.inference_engine.infer(
                 images=images,
@@ -147,7 +147,7 @@ class AsyncPi05WebSocketServer:
             )
             total_time = time.time() - start_time
 
-            # 构建响应
+            # Build response
             actions = results["actions"]
             response = {
                 "status": "success",
@@ -159,12 +159,12 @@ class AsyncPi05WebSocketServer:
                 "server_timing": {"total_ms": total_time * 1000},
             }
 
-            # 如果启用了定期刷新,启动后台任务
+            # If periodic refresh is enabled, start background task
             if subtask_refresh_interval is not None and subtask_refresh_interval > 0:
                 response["subtask_refresh_interval"] = subtask_refresh_interval
                 response["subtask_refresh_enabled"] = True
 
-                # 启动定期刷新任务
+                # Start periodic refresh task
                 refresh_task = asyncio.create_task(
                     self._handle_periodic_refresh(
                         websocket,
@@ -178,14 +178,14 @@ class AsyncPi05WebSocketServer:
                     )
                 )
                 self.active_refresh_tasks[websocket] = refresh_task
-                logger.info(f"已启动客户端 {websocket.remote_address} 的定期刷新任务,间隔: {subtask_refresh_interval}s")
+                logger.info(f"Started periodic refresh task for client {websocket.remote_address}, interval: {subtask_refresh_interval}s")
             else:
                 response["subtask_refresh_enabled"] = False
 
             return response
 
         except Exception as e:
-            logger.error(f"处理推理请求时出错: {e}")
+            logger.error(f"Error processing inference request: {e}")
             return {"error": str(e), "status": "error"}
 
     async def _handle_periodic_refresh(
@@ -199,7 +199,7 @@ class AsyncPi05WebSocketServer:
         max_decoding_steps: int,
         temperature: float,
     ):
-        """处理定期刷新子任务"""
+        """Handle periodic subtask refresh"""
         refresh_count = 0
 
         while True:
@@ -207,20 +207,20 @@ class AsyncPi05WebSocketServer:
                 await asyncio.sleep(refresh_interval)
                 refresh_count += 1
 
-                logger.info(f"开始第 {refresh_count} 次子任务刷新 (客户端: {websocket.remote_address})")
+                logger.info(f"Starting {refresh_count}th subtask refresh (client: {websocket.remote_address})")
 
-                # 准备新的观察数据
+                # Prepare new observation data
                 observation = self.inference_engine.prepare_observation(
                     images, high_level_prompt, low_level_prompt, state, mask_subtask_tokens=True
                 )
 
-                # 生成新的子任务
+                # Generate new subtask
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
                 subtask_tokens, subtask_text = await self.inference_engine.generate_subtask(
                     observation, rng, max_decoding_steps, temperature
                 )
 
-                # 发送刷新消息给客户端
+                # Send refresh message to client
                 refresh_message = {
                     "type": "subtask_refresh",
                     "subtask": subtask_text,
@@ -230,72 +230,76 @@ class AsyncPi05WebSocketServer:
                 }
 
                 await websocket.send(json.dumps(refresh_message))
-                logger.info(f"第 {refresh_count} 次刷新完成,新子任务: {subtask_text}")
+                logger.info(f"{refresh_count}th refresh completed, new subtask: {subtask_text}")
 
             except websockets.exceptions.ConnectionClosed:
-                logger.info(f"客户端连接已关闭,停止刷新任务: {websocket.remote_address}")
+                logger.info(f"Client connection closed, stopping refresh task: {websocket.remote_address}")
                 break
             except asyncio.CancelledError:
-                logger.info(f"刷新任务被取消: {websocket.remote_address}")
+                logger.info(f"Refresh task cancelled: {websocket.remote_address}")
                 break
             except Exception as e:
-                logger.error(f"定期刷新出错: {e}")
-                await asyncio.sleep(1)  # 出错后等待1秒再重试
+                logger.error(f"Error in periodic refresh: {e}")
+                await asyncio.sleep(1)  # Wait 1 second before retrying after error
 
     async def start_server(self, *, skip_init: bool = False):
-        """启动 WebSocket 服务器
+        """Start WebSocket server
 
-        skip_init: 为 True 时跳过模型初始化,仅用于连通性排查。
+        skip_init: If True, skip model initialization, only for connectivity testing.
         """
-        logger.info(f"启动异步 Pi0.5 WebSocket 服务器: {self.host}:{self.port}")
+        logger.info(f"Starting asynchronous Pi0.5 WebSocket server: {self.host}:{self.port}")
 
         if skip_init:
-            logger.warning("跳过模型初始化 (--skip-init)。仅用于连通性测试,推理不可用。")
+            logger.warning("Skipping model initialization (--skip-init). Only for connectivity testing, inference unavailable.")
         else:
-            # 初始化推理引擎
-            logger.info("初始化推理引擎(可能需要较长时间,请耐心等待)...")
+            # Initialize inference engine
+            logger.info("Initializing inference engine (may take a long time, please wait)...")
             await self.inference_engine.initialize()
-            logger.info("推理引擎初始化完成")
+            logger.info("Inference engine initialization completed")
 
-        # 启动 WebSocket 服务器
-        logger.info("正在启动 WebSocket 监听...")
-        server = await websockets.serve(self.handle_client, self.host, self.port, ping_interval=30, ping_timeout=10)
+        # Start WebSocket server
+        logger.info("Starting WebSocket listener...")
+        # Increase max_size to handle large messages (e.g., action arrays, images)
+        # Default is 1MB, set to 10MB to handle large inference responses
+        server = await websockets.serve(
+            self.handle_client, self.host, self.port, ping_interval=30, ping_timeout=10, max_size=10 * 1024 * 1024
+        )
 
-        logger.info(f"服务器已启动,监听 {self.host}:{self.port}")
+        logger.info(f"Server started, listening on {self.host}:{self.port}")
 
         try:
             await server.wait_closed()
         except KeyboardInterrupt:
-            logger.info("收到中断信号,正在关闭服务器...")
+            logger.info("Received interrupt signal, shutting down server...")
             server.close()
             await server.wait_closed()
-            logger.info("服务器已关闭")
+            logger.info("Server closed")
 
 
 async def main():
-    """启动服务器"""
+    """Start server"""
     parser = argparse.ArgumentParser(description="Async Pi0.5 WebSocket Server")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="监听地址")
-    parser.add_argument("--port", type=int, default=8765, help="监听端口")
-    parser.add_argument("--config", type=str, default="right_pi05_20", help="模型配置名称")
-    parser.add_argument("--gpu-id", type=int, default=0, help="GPU ID,CPU 可用 -1")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Listen address")
+    parser.add_argument("--port", type=int, default=8765, help="Listen port")
+    parser.add_argument("--config", type=str, default="libero_pi05_action_expert", help="Model config name")
+    parser.add_argument("--gpu-id", type=int, default=0, help="GPU ID, use -1 for CPU")
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
         help="Override checkpoint path (directory or params file).",
     )
-    parser.add_argument("--skip-init", action="store_true", help="跳过模型初始化,仅用于连通性测试")
-    parser.add_argument("--log-level", type=str, default="INFO", help="日志级别: DEBUG/INFO/WARN/ERROR")
+    parser.add_argument("--skip-init", action="store_true", help="Skip model initialization, only for connectivity testing")
+    parser.add_argument("--log-level", type=str, default="INFO", help="Log level: DEBUG/INFO/WARN/ERROR")
     args = parser.parse_args()
 
-    # 设置日志
+    # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # 创建并启动服务器
+    # Create and start server
     server = AsyncPi05WebSocketServer(
         host=args.host,
         port=args.port,

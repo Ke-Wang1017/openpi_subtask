@@ -7,6 +7,8 @@ import logging
 import math
 import os
 import pathlib
+import queue
+import threading
 from typing import Dict
 
 # Default to headless software rendering unless the user sets MUJOCO_GL.
@@ -29,13 +31,20 @@ LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 class SubtaskWebsocketClient:
     """JSON websocket client for async_pi05_websocket_server.py."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765, on_refresh=None):
         uri = f"ws://{host}:{port}"
         logging.info("Connecting to subtask server: %s", uri)
-        self._ws = websockets.sync.client.connect(uri, compression=None, max_size=None)
+        # Increase max_size to handle large messages (e.g., action arrays, images)
+        # Default is 1MB, set to 10MB to match server limit
+        self._ws = websockets.sync.client.connect(uri, compression=None, max_size=10 * 1024 * 1024)
         metadata = self._ws.recv()
         self._metadata = json.loads(metadata)
         logging.info("Server metadata: %s", self._metadata)
+        self._on_refresh = on_refresh
+        self._closed = False
+        self._response_queue = queue.Queue()
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
 
     def infer(
         self,
@@ -47,6 +56,7 @@ class SubtaskWebsocketClient:
         generate_subtask: bool,
         max_decoding_steps: int,
         temperature: float,
+        subtask_refresh_interval: float | None = None,
     ) -> dict:
         request = {
             "images": {key: value.tolist() for key, value in images.items()},
@@ -57,14 +67,41 @@ class SubtaskWebsocketClient:
             "max_decoding_steps": max_decoding_steps,
             "temperature": temperature,
         }
+        if subtask_refresh_interval is not None:
+            request["subtask_refresh_interval"] = subtask_refresh_interval
         self._ws.send(json.dumps(request))
-        response = json.loads(self._ws.recv())
+        response = self._response_queue.get()
         if response.get("status") == "error":
             raise RuntimeError(f"Server error: {response.get('error')}")
         return response
 
+    def _recv_loop(self) -> None:
+        while not self._closed:
+            try:
+                message = self._ws.recv()
+            except Exception as e:
+                if not self._closed:
+                    logging.info("Receiver thread exiting: %s", e)
+                break
+            try:
+                data = json.loads(message)
+            except Exception as e:
+                logging.warning("Failed to decode message: %s", e)
+                continue
+
+            if data.get("type") == "subtask_refresh":
+                if self._on_refresh:
+                    try:
+                        self._on_refresh(data)
+                    except Exception as e:
+                        logging.error("Refresh handler error: %s", e)
+            else:
+                self._response_queue.put(data)
+
     def close(self) -> None:
+        self._closed = True
         self._ws.close()
+        self._recv_thread.join(timeout=1)
 
 
 @dataclasses.dataclass
@@ -78,6 +115,7 @@ class Args:
     replan_steps: int = 5
     max_decoding_steps: int = 25
     temperature: float = 0.1
+    subtask_refresh_interval: float = 0.5
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -120,7 +158,24 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
-    client = SubtaskWebsocketClient(args.host, args.port)
+    current_subtask = {"text": ""}
+    current_subtask_lock = threading.Lock()
+
+    def _set_current_subtask(text: str | None) -> None:
+        if text is None:
+            return
+        with current_subtask_lock:
+            current_subtask["text"] = text
+
+    def _on_refresh(data: dict) -> None:
+        refreshed = data.get("subtask")
+        if refreshed:
+            _set_current_subtask(refreshed)
+            logging.info("Subtask refresh: %s", refreshed)
+            print(f"Subtask refresh: {refreshed}")
+
+    client = SubtaskWebsocketClient(args.host, args.port, on_refresh=_on_refresh)
+    refresh_started = False
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -142,7 +197,7 @@ def eval_libero(args: Args) -> None:
             # Reset environment
             env.reset()
             action_plan = collections.deque()
-            current_subtask = ""
+            _set_current_subtask("")
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
@@ -184,31 +239,46 @@ def eval_libero(args: Args) -> None:
                                 obs["robot0_gripper_qpos"],
                             )
                         )
+                        # Map LIBERO image keys to model expected keys
+                        # Model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
                         images = {
                             "base_0_rgb": img,
                             "left_wrist_0_rgb": wrist_img,
                             "right_wrist_0_rgb": np.zeros_like(img),
                         }
 
+                        with current_subtask_lock:
+                            low_level_prompt = current_subtask["text"]
+
                         # Generate subtask from high-level instruction.
+                        refresh_interval = None
+                        if not refresh_started and args.subtask_refresh_interval > 0:
+                            refresh_interval = args.subtask_refresh_interval
                         subtask_response = client.infer(
                             images=images,
                             high_level_prompt=str(task_description),
-                            low_level_prompt=current_subtask,
+                            low_level_prompt=low_level_prompt,
                             state=state,
                             generate_subtask=True,
                             max_decoding_steps=args.max_decoding_steps,
                             temperature=args.temperature,
+                            subtask_refresh_interval=refresh_interval,
                         )
                         if subtask_response.get("subtask"):
-                            current_subtask = subtask_response["subtask"]
-                        logging.info("Subtask: %s", current_subtask)
+                            _set_current_subtask(subtask_response["subtask"])
+                        if refresh_interval is not None:
+                            refresh_started = True
+                        with current_subtask_lock:
+                            logging.info("Subtask: %s", current_subtask["text"])
+                            print(f"Subtask: {current_subtask['text']}")
 
                         # Query model to get action chunk.
+                        with current_subtask_lock:
+                            low_level_prompt = current_subtask["text"]
                         action_response = client.infer(
                             images=images,
                             high_level_prompt=str(task_description),
-                            low_level_prompt=current_subtask,
+                            low_level_prompt=low_level_prompt,
                             state=state,
                             generate_subtask=False,
                             max_decoding_steps=args.max_decoding_steps,
