@@ -272,7 +272,7 @@ class AsyncPi05Inference:
             action_time = time.time() - action_start_time
             # sampled_actions is (x_0, output_tokens) where x_0 has shape (batch, horizon, dim)
             # Extract first batch: x_0[0] gives shape (horizon, dim)
-            results["actions"] = np.array(sampled_actions[0][0])
+            results["actions"] = np.array(sampled_actions[0])
 
             total_time = time.time() - start_time
             results["timing"] = {"total_ms": total_time * 1000, "action_ms": action_time * 1000, "subtask_ms": 0}
@@ -280,21 +280,6 @@ class AsyncPi05Inference:
             # Only generate subtask, do not generate actions (actions are handled by continuous generation)
             total_time = time.time() - start_time
             results["timing"] = {"total_ms": total_time * 1000, "action_ms": 0, "subtask_ms": total_time * 1000}
-
-        # If refresh interval is set, start periodic refresh task
-        if subtask_refresh_interval is not None and subtask_refresh_interval > 0:
-            results["subtask_refresh_interval"] = subtask_refresh_interval
-            results["subtask_refresh_task"] = asyncio.create_task(
-                self._periodic_subtask_refresh(
-                    images,
-                    high_level_prompt,
-                    low_level_prompt,
-                    state,
-                    subtask_refresh_interval,
-                    max_decoding_steps,
-                    temperature,
-                )
-            )
 
         logger.info(f"Inference completed, total time: {total_time:.3f}s")
         return results
@@ -468,7 +453,7 @@ async def main():
         generate_subtask=True,
         max_decoding_steps=200,
         temperature=0.1,
-        subtask_refresh_interval=2.0,  # Refresh every 2 seconds
+        subtask_refresh_interval=0.5,  # Refresh every 2 seconds
     )
 
     print("Inference results:")

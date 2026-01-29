@@ -34,6 +34,7 @@ class AsyncPi05WebSocketServer:
         )
         self.clients = set()
         self.active_refresh_tasks = {}  # store active refresh tasks
+        self.latest_observations = {}  # store latest observation per client
 
     async def register_client(self, websocket: WebSocketServerProtocol):
         """Register new client"""
@@ -50,6 +51,9 @@ class AsyncPi05WebSocketServer:
             task.cancel()
             del self.active_refresh_tasks[websocket]
             logger.info(f"Cancelled refresh task for client {websocket.remote_address}")
+
+        if websocket in self.latest_observations:
+            del self.latest_observations[websocket]
 
         logger.info(f"Client disconnected: {websocket.remote_address}")
 
@@ -72,6 +76,39 @@ class AsyncPi05WebSocketServer:
                 try:
                     # Parse request
                     request = json.loads(message)
+                    if request.get("type") == "update_observation":
+                        try:
+                            images_data = request.get("images")
+                            high_level_prompt = request.get("high_level_prompt")
+                            low_level_prompt = request.get("low_level_prompt", "ABCDEFG")
+                            state = request.get("state")
+
+                            if images_data is None or high_level_prompt is None:
+                                logger.warning("update_observation missing required fields")
+                                continue
+
+                            images = {}
+                            for key, img_data in images_data.items():
+                                if isinstance(img_data, list):
+                                    img_array = np.array(img_data, dtype=np.uint8)
+                                else:
+                                    img_array = np.array(img_data, dtype=np.uint8)
+                                images[key] = img_array
+
+                            state_array = None
+                            if state is not None:
+                                state_array = np.array(state, dtype=np.float32)
+
+                            self.latest_observations[websocket] = {
+                                "images": images,
+                                "high_level_prompt": high_level_prompt,
+                                "low_level_prompt": low_level_prompt,
+                                "state": state_array,
+                            }
+                        except Exception as e:
+                            logger.error(f"Failed to update observation: {e}")
+                        continue
+
                     response = await self.process_request(request, websocket)
 
                     # Send response
@@ -131,6 +168,14 @@ class AsyncPi05WebSocketServer:
             noise_array = None
             if noise is not None:
                 noise_array = np.array(noise, dtype=np.float32)
+
+            # Store latest observation for refresh
+            self.latest_observations[websocket] = {
+                "images": images,
+                "high_level_prompt": high_level_prompt,
+                "low_level_prompt": low_level_prompt,
+                "state": state_array,
+            }
 
             # Execute inference
             start_time = time.time()
@@ -206,6 +251,12 @@ class AsyncPi05WebSocketServer:
             try:
                 await asyncio.sleep(refresh_interval)
                 refresh_count += 1
+                latest = self.latest_observations.get(websocket)
+                if latest:
+                    images = latest["images"]
+                    high_level_prompt = latest["high_level_prompt"]
+                    low_level_prompt = latest["low_level_prompt"]
+                    state = latest["state"]
 
                 logger.info(f"Starting {refresh_count}th subtask refresh (client: {websocket.remote_address})")
 
@@ -231,6 +282,8 @@ class AsyncPi05WebSocketServer:
 
                 await websocket.send(json.dumps(refresh_message))
                 logger.info(f"{refresh_count}th refresh completed, new subtask: {subtask_text}")
+                if latest:
+                    latest["low_level_prompt"] = subtask_text
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info(f"Client connection closed, stopping refresh task: {websocket.remote_address}")
@@ -262,7 +315,7 @@ class AsyncPi05WebSocketServer:
         # Increase max_size to handle large messages (e.g., action arrays, images)
         # Default is 1MB, set to 10MB to handle large inference responses
         server = await websockets.serve(
-            self.handle_client, self.host, self.port, ping_interval=30, ping_timeout=10, max_size=10 * 1024 * 1024
+            self.handle_client, self.host, self.port, ping_interval=60, ping_timeout=60, max_size=10 * 1024 * 1024
         )
 
         logger.info(f"Server started, listening on {self.host}:{self.port}")

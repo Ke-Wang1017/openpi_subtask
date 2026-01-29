@@ -627,7 +627,7 @@ class TrainConfig:
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
-    # ⭐ Flexiv Subtask Training Configurations - Three flexible training modes
+    # ⭐ Libero Subtask Training Configurations - Three libero training modes
     
     # Mode 1: Subtask + Flow Matching (Original Pi05 style)
     TrainConfig(
@@ -756,11 +756,11 @@ _CONFIGS = [
     
     # Mode 3: Subtask + FAST + Flow (Hybrid - All three losses)
     TrainConfig(
-        name="flexiv_pi05_subtask_hybrid",
-        exp_name="flexiv_subtask_hybrid",
+        name="libero_pi05_subtask_hybrid",
+        exp_name="libero_subtask_hybrid",
         model=pi05_config.Pi05Config(
             action_horizon=10,
-            action_dim=10,
+            action_dim=7,
             max_token_len=256,
             discrete_state_input=False,
             # ⭐ Use all three losses
@@ -779,15 +779,15 @@ _CONFIGS = [
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=3000,
-            peak_lr=2.5e-5,
-            decay_steps=150_000,
-            decay_lr=2.5e-6,
+            warmup_steps=1000,
+            peak_lr=5e-5,
+            decay_steps=10_000,
+            decay_lr=5e-5,
         ),
-        num_train_steps=100_000,
-        save_interval=10000,
+        num_train_steps=10_000,
+        save_interval=1000,
         batch_size=128,
-        fsdp_devices=8,
+        fsdp_devices=1,
         ema_decay=0.999,
     ),
 

@@ -7,8 +7,7 @@ import logging
 import math
 import os
 import pathlib
-import queue
-import threading
+import time
 from typing import Dict
 
 # Default to headless software rendering unless the user sets MUJOCO_GL.
@@ -25,26 +24,50 @@ import tyro
 import websockets.sync.client
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
-LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+LIBERO_ENV_RESOLUTION = 128  # resolution used to render training data
 
 
-class SubtaskWebsocketClient:
-    """JSON websocket client for async_pi05_websocket_server.py."""
+class SubtaskSyncClient:
+    """Synchronous JSON websocket client for sync_pi05_websocket_server.py."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765, on_refresh=None):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+        *,
+        connect_timeout_s: float = 60.0,
+        connect_retries: int = 5,
+        connect_retry_delay_s: float = 2.0,
+    ):
         uri = f"ws://{host}:{port}"
-        logging.info("Connecting to subtask server: %s", uri)
-        # Increase max_size to handle large messages (e.g., action arrays, images)
-        # Default is 1MB, set to 10MB to match server limit
-        self._ws = websockets.sync.client.connect(uri, compression=None, max_size=10 * 1024 * 1024)
+        logging.info("Connecting to sync subtask server: %s", uri)
+        last_error = None
+        for attempt in range(1, connect_retries + 1):
+            try:
+                self._ws = websockets.sync.client.connect(
+                    uri,
+                    compression=None,
+                    max_size=10 * 1024 * 1024,
+                    open_timeout=connect_timeout_s,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= connect_retries:
+                    raise
+                logging.warning(
+                    "WebSocket connect attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    attempt,
+                    connect_retries,
+                    exc,
+                    connect_retry_delay_s,
+                )
+                time.sleep(connect_retry_delay_s)
+        if last_error is not None:
+            logging.info("WebSocket connection established after retries.")
         metadata = self._ws.recv()
         self._metadata = json.loads(metadata)
         logging.info("Server metadata: %s", self._metadata)
-        self._on_refresh = on_refresh
-        self._closed = False
-        self._response_queue = queue.Queue()
-        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._recv_thread.start()
 
     def infer(
         self,
@@ -56,7 +79,6 @@ class SubtaskWebsocketClient:
         generate_subtask: bool,
         max_decoding_steps: int,
         temperature: float,
-        subtask_refresh_interval: float | None = None,
     ) -> dict:
         request = {
             "images": {key: value.tolist() for key, value in images.items()},
@@ -67,41 +89,14 @@ class SubtaskWebsocketClient:
             "max_decoding_steps": max_decoding_steps,
             "temperature": temperature,
         }
-        if subtask_refresh_interval is not None:
-            request["subtask_refresh_interval"] = subtask_refresh_interval
         self._ws.send(json.dumps(request))
-        response = self._response_queue.get()
+        response = json.loads(self._ws.recv())
         if response.get("status") == "error":
             raise RuntimeError(f"Server error: {response.get('error')}")
         return response
 
-    def _recv_loop(self) -> None:
-        while not self._closed:
-            try:
-                message = self._ws.recv()
-            except Exception as e:
-                if not self._closed:
-                    logging.info("Receiver thread exiting: %s", e)
-                break
-            try:
-                data = json.loads(message)
-            except Exception as e:
-                logging.warning("Failed to decode message: %s", e)
-                continue
-
-            if data.get("type") == "subtask_refresh":
-                if self._on_refresh:
-                    try:
-                        self._on_refresh(data)
-                    except Exception as e:
-                        logging.error("Refresh handler error: %s", e)
-            else:
-                self._response_queue.put(data)
-
     def close(self) -> None:
-        self._closed = True
         self._ws.close()
-        self._recv_thread.join(timeout=1)
 
 
 @dataclasses.dataclass
@@ -111,11 +106,11 @@ class Args:
     #################################################################################################################
     host: str = "0.0.0.0"
     port: int = 8765
-    resize_size: int = 224
-    replan_steps: int = 5
+    resize_size: int = 128
+    replan_steps: int = 10
     max_decoding_steps: int = 25
     temperature: float = 0.1
-    subtask_refresh_interval: float = 0.5
+    subtask_refresh_interval: float = 1.0
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -143,8 +138,7 @@ def eval_libero(args: Args) -> None:
     num_tasks_in_suite = task_suite.n_tasks
     logging.info("Task suite: %s", args.task_suite_name)
 
-    video_out_dir = pathlib.Path(args.video_out_path).expanduser().resolve()
-    video_out_dir.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -159,24 +153,7 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
-    current_subtask = {"text": ""}
-    current_subtask_lock = threading.Lock()
-
-    def _set_current_subtask(text: str | None) -> None:
-        if text is None:
-            return
-        with current_subtask_lock:
-            current_subtask["text"] = text
-
-    def _on_refresh(data: dict) -> None:
-        refreshed = data.get("subtask")
-        if refreshed:
-            _set_current_subtask(refreshed)
-            logging.info("Subtask refresh: %s", refreshed)
-            print(f"Subtask refresh: {refreshed}")
-
-    client = SubtaskWebsocketClient(args.host, args.port, on_refresh=_on_refresh)
-    refresh_started = False
+    client = SubtaskSyncClient(args.host, args.port)
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -198,14 +175,15 @@ def eval_libero(args: Args) -> None:
             # Reset environment
             env.reset()
             action_plan = collections.deque()
-            _set_current_subtask("")
+            current_subtask = ""
+            last_subtask_refresh = 0.0
+            refresh_started = False
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
 
             # Setup
             t = 0
-            # done = False
             replay_images = []
 
             logging.info("Starting episode %d...", task_episodes + 1)
@@ -222,7 +200,6 @@ def eval_libero(args: Args) -> None:
                     # IMPORTANT: rotate 180 degrees to match train preprocessing
                     img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
                     wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
-
                     img = image_tools.convert_to_uint8(
                         image_tools.resize_with_pad(img, args.resize_size, args.resize_size)
                     )
@@ -233,70 +210,83 @@ def eval_libero(args: Args) -> None:
                     # Save preprocessed image for replay video
                     replay_images.append(img)
 
-                    if not action_plan:
-                        # Finished executing previous action chunk -- compute new chunk
-                        state = np.concatenate(
-                            (
-                                obs["robot0_eef_pos"],
-                                _quat2axisangle(obs["robot0_eef_quat"]),
-                                obs["robot0_gripper_qpos"],
-                            )
+                    state = np.concatenate(
+                        (
+                            obs["robot0_eef_pos"],
+                            obs["robot0_eef_quat"],
+                            obs["robot0_gripper_qpos"],
                         )
-                        # Map LIBERO image keys to model expected keys
-                        # Model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
-                        images = {
-                            "base_0_rgb": img,
-                            "left_wrist_0_rgb": wrist_img,
-                            "right_wrist_0_rgb": np.zeros_like(img),
-                        }
+                    )
+                    # Map LIBERO image keys to model expected keys
+                    # Model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+                    images = {
+                        "base_0_rgb": img,
+                        "left_wrist_0_rgb": wrist_img,
+                        "right_wrist_0_rgb": np.zeros_like(img),
+                    }
 
-                        with current_subtask_lock:
-                            low_level_prompt = current_subtask["text"]
-
-                        # Generate subtask from high-level instruction.
-                        refresh_interval = None
-                        if not refresh_started and args.subtask_refresh_interval > 0:
-                            refresh_interval = args.subtask_refresh_interval
+                    if (
+                        refresh_started
+                        and args.subtask_refresh_interval > 0
+                        and (time.time() - last_subtask_refresh) >= args.subtask_refresh_interval
+                    ):
                         subtask_response = client.infer(
                             images=images,
                             high_level_prompt=str(task_description),
-                            low_level_prompt=low_level_prompt,
+                            low_level_prompt=current_subtask,
                             state=state,
                             generate_subtask=True,
                             max_decoding_steps=args.max_decoding_steps,
                             temperature=args.temperature,
-                            subtask_refresh_interval=refresh_interval,
                         )
                         if subtask_response.get("subtask"):
-                            _set_current_subtask(subtask_response["subtask"])
-                        if refresh_interval is not None:
+                            current_subtask = subtask_response["subtask"]
+                            logging.info("Subtask refresh: %s", current_subtask)
+                            print(f"Subtask refresh: {current_subtask}")
+                        last_subtask_refresh = time.time()
+
+                    if not action_plan:
+                        # Finished executing previous action chunk -- compute new chunk
+                        subtask_response = client.infer(
+                            images=images,
+                            high_level_prompt=str(task_description),
+                            low_level_prompt=current_subtask,
+                            state=state,
+                            generate_subtask=True,
+                            max_decoding_steps=args.max_decoding_steps,
+                            temperature=args.temperature,
+                        )
+                        if subtask_response.get("subtask"):
+                            current_subtask = subtask_response["subtask"]
+                        if args.subtask_refresh_interval > 0:
                             refresh_started = True
-                        with current_subtask_lock:
-                            logging.info("Subtask: %s", current_subtask["text"])
-                            print(f"Subtask: {current_subtask['text']}")
+                            last_subtask_refresh = time.time()
+                        logging.info("Subtask: %s", current_subtask)
+                        print(f"Subtask: {current_subtask}")
 
                         # Query model to get action chunk.
-                        with current_subtask_lock:
-                            low_level_prompt = current_subtask["text"]
                         action_response = client.infer(
                             images=images,
                             high_level_prompt=str(task_description),
-                            low_level_prompt=low_level_prompt,
+                            low_level_prompt=current_subtask,
                             state=state,
                             generate_subtask=False,
                             max_decoding_steps=args.max_decoding_steps,
                             temperature=args.temperature,
                         )
-                        action_chunk = action_response.get("actions")
+                        action_chunk = action_response.get("actions")[0]
+                        logging.info("action_chunk shape: %s", np.array(action_chunk).shape)
                         if action_chunk is None:
                             raise RuntimeError("No actions returned from server.")
                         action_chunk = np.asarray(action_chunk)
+
+                        logging.info("action_chunk length: %d", len(action_chunk))
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         action_plan.extend(action_chunk[: args.replan_steps])
 
-                    action = action_plan.popleft()
+                    action = action_plan.popleft()[:7]  # only take the first 7 actions
 
                     # Execute action in environment
                     obs, _reward, done, _info = env.step(action.tolist())
@@ -315,23 +305,13 @@ def eval_libero(args: Args) -> None:
 
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
-            task_segment = "".join(
-                c if (c.isalnum() or c in ("_", "-")) else "_"
-                for c in task_description.replace(" ", "_")
+            task_segment = task_description.replace(" ", "_")
+            imageio.mimwrite(
+                pathlib.Path(args.video_out_path)
+                / f"rollout_{task_segment}_episode_{episode_idx + 1:04d}_{suffix}.mp4",
+                [np.asarray(x) for x in replay_images],
+                fps=10,
             )
-            if replay_images:
-                video_path = (
-                    video_out_dir
-                    / f"rollout_{task_segment}_episode_{episode_idx + 1:04d}_{suffix}.mp4"
-                )
-                imageio.mimwrite(
-                    video_path,
-                    [np.asarray(x) for x in replay_images],
-                    fps=10,
-                )
-                logging.info("Saved replay video: %s", video_path)
-            else:
-                logging.warning("No frames captured; skipping video save for episode %d.", episode_idx + 1)
 
             # Log current results
             logging.info("Success: %s", done)
