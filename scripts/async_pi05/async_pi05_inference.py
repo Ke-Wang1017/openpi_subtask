@@ -100,7 +100,7 @@ class AsyncPi05Inference:
         logger.info("Pi0.5 model initialization completed")
 
     def create_random_image(self, height: int = 224, width: int = 224) -> np.ndarray:
-        """创建随机图像作为 fallback"""
+        """create random image as a fallback"""
         return np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
 
     def load_image_with_fallback(self, img_path: str, img_name: str) -> np.ndarray:
@@ -127,10 +127,13 @@ class AsyncPi05Inference:
     ) -> Observation:
         """Prepare observation data"""
 
-        # Convert images to model expected format [-1, 1]
+        # Keep images as uint8 - Observation.from_dict() will normalize to [-1, 1] automatically
+        # This matches the standard policy pipeline in serve_policy.py
         img_dict = {}
         for key, img in images.items():
-            img_dict[key] = jnp.array(img[np.newaxis, :, :, :]).astype(jnp.float32)
+            # Ensure uint8 dtype so Observation.from_dict() normalizes correctly
+            img_array = np.asarray(img, dtype=np.uint8)
+            img_dict[key] = jnp.array(img_array[np.newaxis, :, :, :])
 
         # Prepare state data
         state = jnp.zeros((1, 32), dtype=jnp.float32) if state is None else jnp.array(state)[np.newaxis, :]
@@ -188,9 +191,13 @@ class AsyncPi05Inference:
         """Generate subtask"""
         start_time = time.time()
 
-        # Generate subtask tokens
-        predicted_token, _kv_cache, _mask, _ar_mask = self.jit_sample_low_level_task(
-            rng, observation, max_decoding_steps, PALIGEMMA_EOS_TOKEN, temperature
+        # Run blocking JAX operation in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        predicted_token, _kv_cache, _mask, _ar_mask = await loop.run_in_executor(
+            None,
+            lambda: self.jit_sample_low_level_task(
+                rng, observation, max_decoding_steps, PALIGEMMA_EOS_TOKEN, temperature
+            ),
         )
 
         # Decode generated subtask
@@ -263,11 +270,20 @@ class AsyncPi05Inference:
         if not generate_subtask:
             # Only generate actions, do not generate subtask
             action_start_time = time.time()
+
+            # Run blocking JAX operation in executor to avoid blocking event loop
+            loop = asyncio.get_event_loop()
             if noise is not None:
                 noise = jnp.array(noise)[np.newaxis, ...] if noise.ndim == 2 else jnp.array(noise)
-                sampled_actions = self.jit_sample_actions(rng, observation, noise=noise)
+                sampled_actions = await loop.run_in_executor(
+                    None,
+                    lambda: self.jit_sample_actions(rng, observation, noise=noise),
+                )
             else:
-                sampled_actions = self.jit_sample_actions(rng, observation)
+                sampled_actions = await loop.run_in_executor(
+                    None,
+                    lambda: self.jit_sample_actions(rng, observation),
+                )
 
             action_time = time.time() - action_start_time
             # sampled_actions is (x_0, output_tokens) where x_0 has shape (batch, horizon, dim)
@@ -301,6 +317,7 @@ class AsyncPi05Inference:
         async with self.low_prompt_lock:
             self.current_low_prompt = low_level_prompt
 
+        loop = asyncio.get_event_loop()
         while True:
             try:
                 await asyncio.sleep(refresh_interval)
@@ -313,9 +330,12 @@ class AsyncPi05Inference:
                 logger.info(f"Starting {refresh_count}th subtask refresh...")
                 logger.info(f"Current low_level_prompt: {current_low_prompt}")
 
-                # Prepare new observation data, using current low_level_prompt
-                observation = self.prepare_observation(
-                    images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=True
+                # Prepare new observation data in executor (blocking operation)
+                observation = await loop.run_in_executor(
+                    None,
+                    lambda: self.prepare_observation(
+                        images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=True
+                    ),
                 )
 
                 # Generate new subtask
@@ -380,6 +400,7 @@ class AsyncPi05Inference:
 
         logger.info(f"Starting continuous action generation, interval: {action_interval}s, max actions: {max_actions}")
 
+        loop = asyncio.get_event_loop()
         while action_count < max_actions:
             try:
                 await asyncio.sleep(action_interval)
@@ -389,14 +410,20 @@ class AsyncPi05Inference:
                 async with self.low_prompt_lock:
                     current_low_prompt = self.current_low_prompt
 
-                # Prepare observation data (using current low_level_prompt)
-                observation = self.prepare_observation(
-                    images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=False
+                # Prepare observation data in executor (blocking operation)
+                observation = await loop.run_in_executor(
+                    None,
+                    lambda: self.prepare_observation(
+                        images, high_level_prompt, current_low_prompt, state, mask_subtask_tokens=False
+                    ),
                 )
 
-                # Generate actions
+                # Generate actions in executor (blocking JAX operation)
                 rng = jax.random.key(int(time.time() * 1000) % 2**32)
-                actions = self.jit_sample_actions(rng, observation)
+                actions = await loop.run_in_executor(
+                    None,
+                    lambda: self.jit_sample_actions(rng, observation),
+                )
 
                 logger.info(f"Generated {action_count}th action sequence, shape: {np.array(actions[0]).shape}")
                 logger.info(f"Current low_level_prompt: {current_low_prompt}")

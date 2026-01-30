@@ -137,7 +137,7 @@ def eval_libero(args: Args) -> None:
                             "state": np.concatenate(
                                 (
                                     obs["robot0_eef_pos"],
-                                    _quat2axisangle(obs["robot0_eef_quat"]),
+                                    _quat2axisangle(obs["robot0_eef_quat"]),  # Convert quaternion to axis-angle (3D instead of 4D)
                                     obs["robot0_gripper_qpos"],
                                 )
                             ),

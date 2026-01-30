@@ -7,8 +7,6 @@ import logging
 import math
 import os
 import pathlib
-import queue
-import threading
 from typing import Dict
 
 # Default to headless software rendering unless the user sets MUJOCO_GL.
@@ -29,79 +27,71 @@ LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
 
 class SubtaskWebsocketClient:
-    """JSON websocket client for async_pi05_websocket_server.py."""
+    """Simple synchronous JSON websocket client for Pi0.5 server.
+    
+    Each request sends images, high-level prompt, and state.
+    Server generates subtask first, then actions, and returns both.
+    """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765, on_refresh=None):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765, timeout: float = 120.0):
         uri = f"ws://{host}:{port}"
         logging.info("Connecting to subtask server: %s", uri)
         # Increase max_size to handle large messages (e.g., action arrays, images)
-        # Default is 1MB, set to 10MB to match server limit
-        self._ws = websockets.sync.client.connect(uri, compression=None, max_size=10 * 1024 * 1024)
+        self._ws = websockets.sync.client.connect(
+            uri, 
+            compression=None, 
+            max_size=10 * 1024 * 1024,
+            close_timeout=timeout,
+        )
         metadata = self._ws.recv()
         self._metadata = json.loads(metadata)
         logging.info("Server metadata: %s", self._metadata)
-        self._on_refresh = on_refresh
-        self._closed = False
-        self._response_queue = queue.Queue()
-        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._recv_thread.start()
+        self._timeout = timeout
 
     def infer(
         self,
         *,
         images: Dict[str, np.ndarray],
         high_level_prompt: str,
-        low_level_prompt: str,
         state: np.ndarray,
-        generate_subtask: bool,
-        max_decoding_steps: int,
-        temperature: float,
-        subtask_refresh_interval: float | None = None,
+        max_decoding_steps: int = 25,
+        temperature: float = 0.1,
     ) -> dict:
+        """Send inference request and receive subtask + actions.
+        
+        Args:
+            images: Dictionary of image arrays
+            high_level_prompt: The high-level task instruction
+            state: Robot state array
+            max_decoding_steps: Max steps for subtask generation
+            temperature: Sampling temperature
+            
+        Returns:
+            Dictionary with 'subtask' and 'actions' keys
+        """
         request = {
             "images": {key: value.tolist() for key, value in images.items()},
             "high_level_prompt": high_level_prompt,
-            "low_level_prompt": low_level_prompt,
             "state": state.tolist(),
-            "generate_subtask": generate_subtask,
             "max_decoding_steps": max_decoding_steps,
             "temperature": temperature,
         }
-        if subtask_refresh_interval is not None:
-            request["subtask_refresh_interval"] = subtask_refresh_interval
+        
         self._ws.send(json.dumps(request))
-        response = self._response_queue.get()
+        response_str = self._ws.recv()
+        response = json.loads(response_str)
+        
         if response.get("status") == "error":
             raise RuntimeError(f"Server error: {response.get('error')}")
+        
         return response
 
-    def _recv_loop(self) -> None:
-        while not self._closed:
-            try:
-                message = self._ws.recv()
-            except Exception as e:
-                if not self._closed:
-                    logging.info("Receiver thread exiting: %s", e)
-                break
-            try:
-                data = json.loads(message)
-            except Exception as e:
-                logging.warning("Failed to decode message: %s", e)
-                continue
-
-            if data.get("type") == "subtask_refresh":
-                if self._on_refresh:
-                    try:
-                        self._on_refresh(data)
-                    except Exception as e:
-                        logging.error("Refresh handler error: %s", e)
-            else:
-                self._response_queue.put(data)
-
     def close(self) -> None:
-        self._closed = True
-        self._ws.close()
-        self._recv_thread.join(timeout=1)
+        """Close the websocket connection."""
+        try:
+            self._ws.close()
+        except Exception:
+            pass
 
 
 @dataclasses.dataclass
@@ -112,10 +102,9 @@ class Args:
     host: str = "0.0.0.0"
     port: int = 8765
     resize_size: int = 224
-    replan_steps: int = 5
+    replan_steps: int = 10
     max_decoding_steps: int = 25
     temperature: float = 0.1
-    subtask_refresh_interval: float = 0.5
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -124,7 +113,7 @@ class Args:
         "libero_10"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 1  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -159,24 +148,7 @@ def eval_libero(args: Args) -> None:
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
-    current_subtask = {"text": ""}
-    current_subtask_lock = threading.Lock()
-
-    def _set_current_subtask(text: str | None) -> None:
-        if text is None:
-            return
-        with current_subtask_lock:
-            current_subtask["text"] = text
-
-    def _on_refresh(data: dict) -> None:
-        refreshed = data.get("subtask")
-        if refreshed:
-            _set_current_subtask(refreshed)
-            logging.info("Subtask refresh: %s", refreshed)
-            print(f"Subtask refresh: {refreshed}")
-
-    client = SubtaskWebsocketClient(args.host, args.port, on_refresh=_on_refresh)
-    refresh_started = False
+    client = SubtaskWebsocketClient(args.host, args.port)
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -198,14 +170,12 @@ def eval_libero(args: Args) -> None:
             # Reset environment
             env.reset()
             action_plan = collections.deque()
-            _set_current_subtask("")
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
 
             # Setup
             t = 0
-            # done = False
             replay_images = []
 
             logging.info("Starting episode %d...", task_episodes + 1)
@@ -242,61 +212,49 @@ def eval_libero(args: Args) -> None:
                                 obs["robot0_gripper_qpos"],
                             )
                         )
-                        # Map LIBERO image keys to model expected keys
-                        # Model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+                        # Use model-style image keys
                         images = {
                             "base_0_rgb": img,
                             "left_wrist_0_rgb": wrist_img,
                             "right_wrist_0_rgb": np.zeros_like(img),
                         }
 
-                        with current_subtask_lock:
-                            low_level_prompt = current_subtask["text"]
-
-                        # Generate subtask from high-level instruction.
-                        refresh_interval = None
-                        if not refresh_started and args.subtask_refresh_interval > 0:
-                            refresh_interval = args.subtask_refresh_interval
-                        subtask_response = client.infer(
+                        # Single request: server generates subtask first, then actions
+                        response = client.infer(
                             images=images,
                             high_level_prompt=str(task_description),
-                            low_level_prompt=low_level_prompt,
                             state=state,
-                            generate_subtask=True,
-                            max_decoding_steps=args.max_decoding_steps,
-                            temperature=args.temperature,
-                            subtask_refresh_interval=refresh_interval,
-                        )
-                        if subtask_response.get("subtask"):
-                            _set_current_subtask(subtask_response["subtask"])
-                        if refresh_interval is not None:
-                            refresh_started = True
-                        with current_subtask_lock:
-                            logging.info("Subtask: %s", current_subtask["text"])
-                            print(f"Subtask: {current_subtask['text']}")
-
-                        # Query model to get action chunk.
-                        with current_subtask_lock:
-                            low_level_prompt = current_subtask["text"]
-                        action_response = client.infer(
-                            images=images,
-                            high_level_prompt=str(task_description),
-                            low_level_prompt=low_level_prompt,
-                            state=state,
-                            generate_subtask=False,
                             max_decoding_steps=args.max_decoding_steps,
                             temperature=args.temperature,
                         )
-                        action_chunk = action_response.get("actions")
+                        
+                        # Log the generated subtask
+                        subtask = response.get("subtask", "")
+                        logging.info("Generated subtask: %s", subtask)
+                        print(f"Subtask: {subtask}")
+                        
+                        # Get action chunk
+                        action_chunk = response.get("actions")
                         if action_chunk is None:
                             raise RuntimeError("No actions returned from server.")
                         action_chunk = np.asarray(action_chunk)
+                        action_chunk = action_chunk[0]
+                        print(f"Action chunk shape: {action_chunk.shape}")
+                        
+                        # Log timing info
+                        timing = response.get("timing", {})
+                        logging.info("Timing - subtask: %.1fms, action: %.1fms, total: %.1fms",
+                                   timing.get("subtask_ms", 0),
+                                   timing.get("action_ms", 0),
+                                   timing.get("total_ms", 0))
+                        
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         action_plan.extend(action_chunk[: args.replan_steps])
 
                     action = action_plan.popleft()
+                    action = action[:7]
 
                     # Execute action in environment
                     obs, _reward, done, _info = env.step(action.tolist())
@@ -308,6 +266,8 @@ def eval_libero(args: Args) -> None:
 
                 except Exception as e:
                     logging.error("Caught exception: %s", e)
+                    import traceback
+                    traceback.print_exc()
                     break
 
             task_episodes += 1
@@ -319,6 +279,7 @@ def eval_libero(args: Args) -> None:
                 c if (c.isalnum() or c in ("_", "-")) else "_"
                 for c in task_description.replace(" ", "_")
             )
+            print(f"Length of Replay images: {len(replay_images)}")
             if replay_images:
                 video_path = (
                     video_out_dir

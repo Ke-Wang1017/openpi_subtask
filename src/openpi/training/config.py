@@ -490,8 +490,8 @@ class LeRobotLiberoSubtaskDataConfig(DataConfigFactory):
     """
     Data config for Libero environment with subtask support.
     Assumes features stored as:
-      - images.agentview_rgb: image (3, 128, 128) uint8
-      - images.wrist_rgb: image (3, 128, 128) uint8
+      - images.agentview_rgb: image (3, 256, 256) uint8
+      - images.wrist_rgb: image (3, 256, 256) uint8
       - state: float32, shape (8,)
       - actions: float32, shape (horizon, 7)
       - task: string (high-level task)
@@ -759,14 +759,13 @@ _CONFIGS = [
         name="libero_pi05_subtask_hybrid",
         exp_name="libero_subtask_hybrid",
         model=pi05_config.Pi05Config(
-            action_horizon=10,
-            action_dim=7,
+            action_horizon=20,
             max_token_len=256,
             discrete_state_input=False,
             # ⭐ Use all three losses
-            subtask_loss_weight=1.0,
-            fast_token_loss_weight=0.5,  # Lower weight for FAST tokens
-            flow_matching_loss_weight=0.5,  # Lower weight for flow matching
+            subtask_loss_weight=0.1,
+            fast_token_loss_weight=0.1,  # Lower weight for FAST tokens
+            flow_matching_loss_weight=1.5,  # Lower weight for flow matching
             fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
@@ -779,14 +778,14 @@ _CONFIGS = [
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1000,
-            peak_lr=5e-5,
-            decay_steps=10_000,
-            decay_lr=5e-5,
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
         ),
-        num_train_steps=10_000,
-        save_interval=1000,
-        batch_size=128,
+        num_train_steps=30_000,
+        save_interval=6000,
+        batch_size=64,
         fsdp_devices=1,
         ema_decay=0.999,
     ),
