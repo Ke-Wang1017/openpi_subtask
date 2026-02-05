@@ -649,6 +649,7 @@ _CONFIGS = [
             repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="libero_subtask",
+                use_quantile_norm=True,  # ⭐ Use quantile normalization for gripper actions
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -688,6 +689,7 @@ _CONFIGS = [
             repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="libero_subtask",
+                use_quantile_norm=True,  # ⭐ Use quantile normalization for gripper actions
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -732,6 +734,7 @@ _CONFIGS = [
             repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="libero_subtask",
+                use_quantile_norm=True,  # ⭐ Use quantile normalization for gripper actions
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -775,6 +778,7 @@ _CONFIGS = [
             repo_id="KeWangRobotics/libero_10_subtasks",
             base_config=DataConfig(
                 asset_id="libero_subtask",
+                use_quantile_norm=True,  # ⭐ Use quantile normalization for gripper actions
             ),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -783,8 +787,8 @@ _CONFIGS = [
             decay_steps=150_000,
             decay_lr=2.5e-6,
         ),
-        num_train_steps=30_000,
-        save_interval=6000,
+        num_train_steps=60_000,
+        save_interval=10000,
         batch_size=64,
         fsdp_devices=1,
         ema_decay=0.999,

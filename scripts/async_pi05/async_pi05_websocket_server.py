@@ -15,10 +15,12 @@ from websockets.server import WebSocketServerProtocol
 
 logger = logging.getLogger(__name__)
 
-# Image key mapping: LIBERO-style keys -> Model-expected keys
-# The Pi05 model expects these specific keys: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
-LIBERO_TO_MODEL_IMAGE_KEYS = {
-    # LIBERO-style keys (from training data transforms)
+# Image key mapping: Various input keys -> Model keys
+# LiberoSubtaskInputs now uses the same keys as LiberoInputs:
+#   base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+# Client can send either LIBERO-style or model-style keys, server maps to model keys.
+INPUT_TO_MODEL_IMAGE_KEYS = {
+    # LIBERO-style keys -> Model keys
     "agentview_rgb": "base_0_rgb",
     "wrist_rgb_left": "left_wrist_0_rgb",
     "wrist_rgb": "left_wrist_0_rgb",  # Alternative name
@@ -30,24 +32,24 @@ LIBERO_TO_MODEL_IMAGE_KEYS = {
 
 
 def map_image_keys_to_model(images: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Map LIBERO image keys to model expected keys.
+    """Map input image keys to model keys (matching LiberoInputs/LiberoSubtaskInputs).
     
-    The Pi05 model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+    The model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
     LIBERO datasets use: agentview_rgb, wrist_rgb_left
     
-    This function maps LIBERO keys to model keys and adds a dummy right_wrist if needed.
+    This function maps any input key format to the model format and adds
+    a zeroed right_wrist_0_rgb placeholder if not provided.
     """
     mapped = {}
     for key, value in images.items():
-        new_key = LIBERO_TO_MODEL_IMAGE_KEYS.get(key, key)
+        new_key = INPUT_TO_MODEL_IMAGE_KEYS.get(key, key)
         mapped[new_key] = value
     
-    # Add dummy right_wrist_0_rgb if not present (LIBERO only has 2 cameras)
+    # Add zeroed right_wrist_0_rgb if not present (LIBERO only has 2 cameras)
     if "right_wrist_0_rgb" not in mapped and len(mapped) > 0:
-        # Use the first image as template for creating a zero image
         template = next(iter(mapped.values()))
         mapped["right_wrist_0_rgb"] = np.zeros_like(template)
-        logger.debug("Added dummy right_wrist_0_rgb image")
+        logger.debug("Added zeroed right_wrist_0_rgb placeholder")
     
     return mapped
 
@@ -65,9 +67,9 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> dict | Non
     # Common locations for norm_stats
     search_paths = [
         checkpoint_dir / "assets" / "KeWangRobotics" / "libero_10_subtasks" / "norm_stats.json",
-        checkpoint_dir / "assets" / "libero_subtask" / "norm_stats.json",
-        checkpoint_dir / "norm_stats.json",
-        pathlib.Path(os.path.expanduser("~/.cache/openpi/openpi-assets")) / config_name / "KeWangRobotics" / "libero_10_subtasks" / "norm_stats.json",
+        # checkpoint_dir / "assets" / "libero_subtask" / "norm_stats.json",
+        # checkpoint_dir / "norm_stats.json",
+        # pathlib.Path(os.path.expanduser("~/.cache/openpi/openpi-assets")) / config_name / "KeWangRobotics" / "libero_10_subtasks" / "norm_stats.json",
     ]
     
     for path in search_paths:
@@ -81,13 +83,14 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> dict | Non
     return None
 
 
-def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32) -> np.ndarray:
-    """Normalize state using mean/std from norm_stats and pad to expected dimension.
+def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
+    """Normalize state using quantile stats from norm_stats and pad to expected dimension.
     
     Args:
         state: Raw state array (e.g., 8D for LIBERO)
-        norm_stats: Dictionary with 'state' key containing 'mean' and 'std'
-        pad_to_dim: Dimension to pad state to (default 32 for Pi05 model)
+        norm_stats: Dictionary with 'state' key containing 'q01', 'q99' (and 'mean', 'std')
+        pad_to_dim: Dimension to pad state to (default 8 for Pi05 model)
+        use_quantiles: If True, use quantile normalization. Otherwise, use z-score.
     
     Returns:
         Normalized and padded state array
@@ -100,13 +103,20 @@ def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32) -
         return state
     
     stats = norm_stats["state"]
-    mean = np.array(stats["mean"], dtype=np.float32)
-    std = np.array(stats["std"], dtype=np.float32)
-    
-    # Normalize only the dimensions we have stats for
-    state_dim = min(state.shape[-1], len(mean))
     normalized = state.copy().astype(np.float32)
-    normalized[..., :state_dim] = (state[..., :state_dim] - mean[:state_dim]) / (std[:state_dim] + 1e-6)
+    
+    if use_quantiles:
+        # Quantile normalization: (x - q01) / (q99 - q01) * 2 - 1 -> maps to [-1, 1]
+        q01 = np.array(stats["q01"], dtype=np.float32)
+        q99 = np.array(stats["q99"], dtype=np.float32)
+        state_dim = min(state.shape[-1], len(q01))
+        normalized[..., :state_dim] = (state[..., :state_dim] - q01[:state_dim]) / (q99[:state_dim] - q01[:state_dim] + 1e-6) * 2.0 - 1.0
+    else:
+        # Z-score normalization
+        mean = np.array(stats["mean"], dtype=np.float32)
+        std = np.array(stats["std"], dtype=np.float32)
+        state_dim = min(state.shape[-1], len(mean))
+        normalized[..., :state_dim] = (state[..., :state_dim] - mean[:state_dim]) / (std[:state_dim] + 1e-6)
     
     # Pad to expected dimension (zeros for extra dimensions)
     if normalized.shape[-1] < pad_to_dim:
@@ -116,19 +126,36 @@ def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32) -
     return normalized
 
 
-def unnormalize_actions(actions: np.ndarray, norm_stats: dict) -> np.ndarray:
-    """Unnormalize actions using mean/std from norm_stats."""
+def unnormalize_actions(actions: np.ndarray, norm_stats: dict, use_quantiles: bool = True) -> np.ndarray:
+    """Unnormalize actions using quantile stats from norm_stats.
+    
+    Args:
+        actions: Normalized action array from model output
+        norm_stats: Dictionary with 'actions' key containing 'q01', 'q99' (and 'mean', 'std')
+        use_quantiles: If True, use quantile unnormalization. Otherwise, use z-score.
+    
+    Returns:
+        Unnormalized action array in original action space
+    """
     if norm_stats is None or "actions" not in norm_stats:
         return actions
     
     stats = norm_stats["actions"]
-    mean = np.array(stats["mean"], dtype=np.float32)
-    std = np.array(stats["std"], dtype=np.float32)
-    
-    # Handle dimension mismatch - only unnormalize the dimensions we have stats for
-    action_dim = min(actions.shape[-1], len(mean))
     unnormalized = actions.copy()
-    unnormalized[..., :action_dim] = actions[..., :action_dim] * (std[:action_dim] + 1e-6) + mean[:action_dim]
+    
+    if use_quantiles:
+        # Quantile unnormalization: (x + 1) / 2 * (q99 - q01) + q01 -> maps from [-1, 1] to [q01, q99]
+        q01 = np.array(stats["q01"], dtype=np.float32)
+        q99 = np.array(stats["q99"], dtype=np.float32)
+        action_dim = min(actions.shape[-1], len(q01))
+        unnormalized[..., :action_dim] = (actions[..., :action_dim] + 1.0) / 2.0 * (q99[:action_dim] - q01[:action_dim] + 1e-6) + q01[:action_dim]
+    else:
+        # Z-score unnormalization
+        mean = np.array(stats["mean"], dtype=np.float32)
+        std = np.array(stats["std"], dtype=np.float32)
+        action_dim = min(actions.shape[-1], len(mean))
+        unnormalized[..., :action_dim] = actions[..., :action_dim] * (std[:action_dim] + 1e-6) + mean[:action_dim]
+    
     return unnormalized
 
 
@@ -183,10 +210,9 @@ class AsyncPi05WebSocketServer:
                 "capabilities": ["subtask_generation", "action_prediction"],
                 "max_decoding_steps": 25,
                 # Server accepts both LIBERO-style and model-style image keys
-                "supported_image_types": {
-                    "libero_style": ["agentview_rgb", "wrist_rgb_left"],
-                    "model_style": ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"],
-                },
+                # Automatically adds zeroed right_wrist_0_rgb if not provided
+                "supported_image_types": ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"],
+                "alternative_image_types": ["agentview_rgb", "wrist_rgb_left"],
                 "normalization_enabled": self.norm_stats is not None,
             }
             await websocket.send(json.dumps(metadata))
@@ -248,21 +274,22 @@ class AsyncPi05WebSocketServer:
                     img_array = np.array(img_data, dtype=np.uint8)
                 images[key] = img_array
             
-            # Map LIBERO-style keys to model-expected keys
+            # Map input keys to model keys (base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb)
+            # This matches LiberoInputs/LiberoSubtaskInputs format
             images = map_image_keys_to_model(images)
-            logger.debug(f"Mapped image keys: {list(images.keys())}")
+            print(f"[DEBUG] Mapped image keys: {list(images.keys())}")
 
-            # Convert state data, normalize, and pad to 32D
+            # Convert state data, normalize (quantile), and pad to 8D
             state_array = None
             if state is not None:
                 raw_state = np.array(state, dtype=np.float32)
                 # Log raw gripper state (last 2 dims of 8D state)
                 if len(raw_state) >= 8:
                     print(f"[GRIPPER DEBUG] Raw gripper state (dims 6-7): {raw_state[6:8]}")
-                # Apply normalization and padding
-                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=32)
+                # Apply quantile normalization and padding
+                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=8, use_quantiles=True)
                 if len(raw_state) >= 8:
-                    print(f"[GRIPPER DEBUG] Normalized gripper state (dims 6-7): {state_array[6:8]}")
+                    print(f"[GRIPPER DEBUG] Quantile-normalized gripper state (dims 6-7): {state_array[6:8]}")
                 print(f"[GRIPPER DEBUG] Full normalized state shape: {state_array.shape}")
 
             # Convert noise data
@@ -310,15 +337,15 @@ class AsyncPi05WebSocketServer:
             # Build response with both subtask and actions
             actions = action_results["actions"]
             
-            # Unnormalize actions before returning
+            # Unnormalize actions using quantile normalization before returning
             if actions is not None:
                 # Log raw model output gripper (dim 6) before unnormalization
                 raw_gripper = actions[0, 0, 6] if actions.ndim == 3 else actions[0, 6]
-                print(f"[GRIPPER DEBUG] Raw model gripper output (normalized, first action): {raw_gripper:.4f}")
-                actions = unnormalize_actions(actions, self.norm_stats)
+                print(f"[GRIPPER DEBUG] Raw model gripper output (quantile-normalized, first action): {raw_gripper:.4f}")
+                actions = unnormalize_actions(actions, self.norm_stats, use_quantiles=True)
                 # Log unnormalized gripper action
                 unnorm_gripper = actions[0, 0, 6] if actions.ndim == 3 else actions[0, 6]
-                print(f"[GRIPPER DEBUG] Unnormalized gripper action (first action): {unnorm_gripper:.4f}")
+                print(f"[GRIPPER DEBUG] Quantile-unnormalized gripper action (first action): {unnorm_gripper:.4f}")
                 print(f"[GRIPPER DEBUG] Actions shape: {actions.shape}")
             
             response = {

@@ -113,7 +113,7 @@ class Args:
         "libero_10"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 1  # Number of rollouts per task
+    num_trials_per_task: int = 5  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -142,7 +142,7 @@ def eval_libero(args: Args) -> None:
     elif args.task_suite_name == "libero_goal":
         max_steps = 300  # longest training demo has 270 steps
     elif args.task_suite_name == "libero_10":
-        max_steps = 520  # longest training demo has 505 steps
+        max_steps = 425  # longest training demo has 505 steps
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
     else:
@@ -212,11 +212,11 @@ def eval_libero(args: Args) -> None:
                                 obs["robot0_gripper_qpos"],
                             )
                         )
-                        # Use model-style image keys
+                        # Use model-style image keys (matching LiberoInputs/LiberoSubtaskInputs)
+                        # Server will add zeroed right_wrist_0_rgb if not provided
                         images = {
                             "base_0_rgb": img,
                             "left_wrist_0_rgb": wrist_img,
-                            "right_wrist_0_rgb": np.zeros_like(img),
                         }
 
                         # Single request: server generates subtask first, then actions
@@ -238,7 +238,8 @@ def eval_libero(args: Args) -> None:
                         if action_chunk is None:
                             raise RuntimeError("No actions returned from server.")
                         action_chunk = np.asarray(action_chunk)
-                        action_chunk = action_chunk[0]
+                        if action_chunk.ndim == 3:
+                            action_chunk = action_chunk[0]
                         print(f"Action chunk shape: {action_chunk.shape}")
                         
                         # Log timing info

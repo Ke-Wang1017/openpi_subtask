@@ -71,17 +71,18 @@ class LiberoSubtaskInputs(transforms.DataTransformFn):
             raise KeyError("Missing wrist image key: expected 'images.wrist_rgb_left' or 'images.wrist_rgb'")
 
         # 3. organize image input based on model type
+        # Match LiberoInputs: include right_wrist_0_rgb as zeroed placeholder
         match self.model_type:
             case _model.ModelType.PI0 | _model.ModelType.PI05:
-                # external camera + left wrist camera   
-                image_names = ("agentview_rgb", "wrist_rgb_left")
-                images = (exterior_image, wrist_image_left)
-                image_masks = (np.True_, np.True_)
+                # external camera + left wrist camera + right wrist camera (zeroed placeholder)
+                image_names = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+                images = (exterior_image, wrist_image_left, np.zeros_like(exterior_image))
+                image_masks = (np.True_, np.True_, np.False_)  # Mask the zeroed right wrist
             case _model.ModelType.PI0_FAST:
-                # external camera + padding image + left wrist camera
-                image_names = ("agentview_rgb", "agentview_rgb_padding", "wrist_rgb_left")
-                images = (exterior_image, np.zeros_like(exterior_image), wrist_image_left)
-                image_masks = (np.True_, np.True_, np.True_)
+                # external camera + left wrist camera + right wrist camera (zeroed placeholder)
+                image_names = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+                images = (exterior_image, wrist_image_left, np.zeros_like(exterior_image))
+                image_masks = (np.True_, np.True_, np.True_)  # PI0_FAST doesn't mask padding
             case _:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
