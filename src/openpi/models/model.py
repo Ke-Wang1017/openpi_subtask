@@ -68,6 +68,8 @@ IMAGE_RESOLUTION = (224, 224)
 #     "tokenized_prompt_mask": bool[*b, l],  # Optional, mask for tokenized prompt
 #     "token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for FAST model
 #     "token_loss_mask": bool[*b, l],  # Optional, loss mask for FAST model
+#     "subtask_region_mask": bool[*b, l],  # Optional, mask for subtask token region
+#     "action_region_mask": bool[*b, l],  # Optional, mask for action token region
 #
 #      # Actions data.
 #      "actions": float32[*b ah ad]
@@ -105,6 +107,10 @@ class Observation(Generic[ArrayT]):
     token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Token region mask for subtask tokens (PI05 hierarchical training).
+    subtask_region_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Token region mask for FAST action tokens (PI05 hierarchical training).
+    action_region_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -126,6 +132,8 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            subtask_region_mask=data.get("subtask_region_mask"),
+            action_region_mask=data.get("action_region_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +213,8 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        subtask_region_mask=observation.subtask_region_mask,
+        action_region_mask=observation.action_region_mask,
     )
 
 

@@ -34,7 +34,12 @@ logger = logging.getLogger(__name__)
 class AsyncPi05Inference:
     """Asynchronous Pi0.5 inference server, supports subtask generation"""
 
-    def __init__(self, config_name: str = "right_pi05_20", gpu_id: int = 1, checkpoint_path: str | None = None):
+    def __init__(
+        self,
+        config_name: str = "libero_pi05_subtask_hybrid",
+        gpu_id: int = 1,
+        checkpoint_path: str | None = None,
+    ):
         self.config_name = config_name
         self.gpu_id = gpu_id
         self.checkpoint_path = checkpoint_path
@@ -130,13 +135,26 @@ class AsyncPi05Inference:
         # Keep images as uint8 - Observation.from_dict() will normalize to [-1, 1] automatically
         # This matches the standard policy pipeline in serve_policy.py
         img_dict = {}
+        image_mask_dict = {}
         for key, img in images.items():
             # Ensure uint8 dtype so Observation.from_dict() normalizes correctly
             img_array = np.asarray(img, dtype=np.uint8)
             img_dict[key] = jnp.array(img_array[np.newaxis, :, :, :])
+            # Match training behavior: zeroed right wrist placeholder should be masked out.
+            image_mask_dict[key] = jnp.array(
+                [not (key == "right_wrist_0_rgb" and not np.any(img_array))], dtype=jnp.bool_
+            )
 
         # Prepare state data
-        state = jnp.zeros((1, 32), dtype=jnp.float32) if state is None else jnp.array(state)[np.newaxis, :]
+        if state is None:
+            state_vec = np.zeros((32,), dtype=np.float32)
+        else:
+            state_vec = np.asarray(state, dtype=np.float32).reshape(-1)
+            if state_vec.shape[0] < 32:
+                state_vec = np.pad(state_vec, ((0, 32 - state_vec.shape[0])), constant_values=0.0)
+            elif state_vec.shape[0] > 32:
+                state_vec = state_vec[:32]
+        state_batch = jnp.asarray(state_vec, dtype=jnp.float32)[np.newaxis, :]
 
         # Tokenize prompts
         (
@@ -146,12 +164,12 @@ class AsyncPi05Inference:
             token_loss_mask,
             _subtask_region_mask,
             _action_region_mask,
-        ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state)
+        ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state_vec)
         # Build observation data
         data = {
             "image": img_dict,
-            "image_mask": {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict},
-            "state": state,
+            "image_mask": image_mask_dict,
+            "state": state_batch,
             "tokenized_prompt": jnp.stack([tokenized_prompt], axis=0),
             "tokenized_prompt_mask": jnp.stack([tokenized_prompt_mask], axis=0),
             "token_ar_mask": jnp.stack([token_ar_mask], axis=0),
@@ -178,6 +196,8 @@ class AsyncPi05Inference:
                 tokenized_prompt_mask=new_tokenized_prompt_mask,
                 token_ar_mask=observation.token_ar_mask,
                 token_loss_mask=observation.token_loss_mask,
+                subtask_region_mask=observation.subtask_region_mask,
+                action_region_mask=observation.action_region_mask,
             )
 
             observation = _model.preprocess_observation(
@@ -456,7 +476,7 @@ async def main():
     logger.setLevel(logging.INFO)
 
     # Create inference server
-    inference_server = AsyncPi05Inference(config_name="right_pi05_20", gpu_id=1)
+    inference_server = AsyncPi05Inference(config_name="libero_pi05_subtask_hybrid", gpu_id=1)
 
     # Prepare test images
     img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]

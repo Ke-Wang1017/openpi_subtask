@@ -89,7 +89,7 @@ def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, u
     Args:
         state: Raw state array (e.g., 8D for LIBERO)
         norm_stats: Dictionary with 'state' key containing 'q01', 'q99' (and 'mean', 'std')
-        pad_to_dim: Dimension to pad state to (default 8 for Pi05 model)
+        pad_to_dim: Dimension to pad state to (default 32 for Pi05 model action_dim)
         use_quantiles: If True, use quantile normalization. Otherwise, use z-score.
     
     Returns:
@@ -172,7 +172,7 @@ class AsyncPi05WebSocketServer:
         self,
         host: str = "0.0.0.0",
         port: int = 8765,
-        config_name: str = "right_pi05_20",
+        config_name: str = "libero_pi05_subtask_hybrid",
         gpu_id: int = 1,
         checkpoint_path: str | None = None,
     ):
@@ -279,7 +279,7 @@ class AsyncPi05WebSocketServer:
             images = map_image_keys_to_model(images)
             print(f"[DEBUG] Mapped image keys: {list(images.keys())}")
 
-            # Convert state data, normalize (quantile), and pad to 8D
+            # Convert state data, normalize (quantile), and pad to 32D (training-time model action dim)
             state_array = None
             if state is not None:
                 raw_state = np.array(state, dtype=np.float32)
@@ -287,7 +287,7 @@ class AsyncPi05WebSocketServer:
                 if len(raw_state) >= 8:
                     print(f"[GRIPPER DEBUG] Raw gripper state (dims 6-7): {raw_state[6:8]}")
                 # Apply quantile normalization and padding
-                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=8, use_quantiles=True)
+                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=32, use_quantiles=True)
                 if len(raw_state) >= 8:
                     print(f"[GRIPPER DEBUG] Quantile-normalized gripper state (dims 6-7): {state_array[6:8]}")
                 print(f"[GRIPPER DEBUG] Full normalized state shape: {state_array.shape}")
@@ -414,7 +414,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Pi0.5 WebSocket Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Listen address")
     parser.add_argument("--port", type=int, default=8765, help="Listen port")
-    parser.add_argument("--config", type=str, default="libero_pi05_action_expert", help="Model config name")
+    parser.add_argument("--config", type=str, default="libero_pi05_subtask_hybrid", help="Model config name")
     parser.add_argument("--gpu-id", type=int, default=0, help="GPU ID, use -1 for CPU")
     parser.add_argument(
         "--checkpoint",
