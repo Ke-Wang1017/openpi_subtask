@@ -120,6 +120,9 @@ class Args:
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
     seed: int = 7  # Random Seed (for reproducibility)
+    save_debug_images: bool = False  # Save raw/rotated/resized images for orientation checks
+    debug_image_out_path: str = "data/libero/debug_images"  # Path to save debug images
+    debug_max_images_per_episode: int = 10  # Max debug frames saved per episode
 
 
 def eval_libero(args: Args) -> None:
@@ -134,6 +137,9 @@ def eval_libero(args: Args) -> None:
 
     video_out_dir = pathlib.Path(args.video_out_path).expanduser().resolve()
     video_out_dir.mkdir(parents=True, exist_ok=True)
+    debug_out_dir = pathlib.Path(args.debug_image_out_path).expanduser().resolve()
+    if args.save_debug_images:
+        debug_out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -161,6 +167,9 @@ def eval_libero(args: Args) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        task_segment = "".join(
+            c if (c.isalnum() or c in ("_", "-")) else "_" for c in task_description.replace(" ", "_")
+        )
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -177,6 +186,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            debug_saved_count = 0
 
             logging.info("Starting episode %d...", task_episodes + 1)
             while t < max_steps + args.num_steps_wait:
@@ -188,17 +198,29 @@ def eval_libero(args: Args) -> None:
                         t += 1
                         continue
 
-                    # Get preprocessed image
-                    # IMPORTANT: rotate 180 degrees to match train preprocessing
-                    img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                    wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                    # Get preprocessed image (no 180-degree rotation)
+                    raw_img = np.ascontiguousarray(obs["agentview_image"])
+                    raw_wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"])
 
                     img = image_tools.convert_to_uint8(
-                        image_tools.resize_with_pad(img, args.resize_size, args.resize_size)
+                        image_tools.resize_with_pad(raw_img, args.resize_size, args.resize_size)
                     )
                     wrist_img = image_tools.convert_to_uint8(
-                        image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
+                        image_tools.resize_with_pad(raw_wrist_img, args.resize_size, args.resize_size)
                     )
+
+                    if args.save_debug_images and debug_saved_count < args.debug_max_images_per_episode:
+                        _save_image_debug_bundle(
+                            debug_out_dir=debug_out_dir,
+                            task_segment=task_segment,
+                            episode_idx=episode_idx,
+                            step_idx=t,
+                            raw_img=raw_img,
+                            raw_wrist_img=raw_wrist_img,
+                            model_img=img,
+                            model_wrist_img=wrist_img,
+                        )
+                        debug_saved_count += 1
 
                     # Save preprocessed image for replay video
                     replay_images.append(img)
@@ -276,10 +298,6 @@ def eval_libero(args: Args) -> None:
 
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
-            task_segment = "".join(
-                c if (c.isalnum() or c in ("_", "-")) else "_"
-                for c in task_description.replace(" ", "_")
-            )
             print(f"Length of Replay images: {len(replay_images)}")
             if replay_images:
                 video_path = (
@@ -307,6 +325,28 @@ def eval_libero(args: Args) -> None:
     logging.info("Total success rate: %f", float(total_successes) / float(total_episodes))
     logging.info("Total episodes: %d", total_episodes)
     client.close()
+
+
+def _save_image_debug_bundle(
+    *,
+    debug_out_dir: pathlib.Path,
+    task_segment: str,
+    episode_idx: int,
+    step_idx: int,
+    raw_img: np.ndarray,
+    raw_wrist_img: np.ndarray,
+    model_img: np.ndarray,
+    model_wrist_img: np.ndarray,
+) -> None:
+    """Save raw + model-input images to verify preprocessing alignment."""
+    episode_dir = debug_out_dir / task_segment / f"episode_{episode_idx + 1:04d}"
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"step_{step_idx:04d}"
+
+    imageio.imwrite(episode_dir / f"{prefix}_agent_raw.png", np.asarray(raw_img))
+    imageio.imwrite(episode_dir / f"{prefix}_wrist_raw.png", np.asarray(raw_wrist_img))
+    imageio.imwrite(episode_dir / f"{prefix}_agent_model_input.png", np.asarray(model_img))
+    imageio.imwrite(episode_dir / f"{prefix}_wrist_model_input.png", np.asarray(model_wrist_img))
 
 
 def _get_libero_env(task, resolution, seed):

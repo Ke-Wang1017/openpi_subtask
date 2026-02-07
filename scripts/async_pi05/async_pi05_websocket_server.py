@@ -54,10 +54,28 @@ def map_image_keys_to_model(images: dict[str, np.ndarray]) -> dict[str, np.ndarr
     return mapped
 
 
-def load_norm_stats(checkpoint_path: str | None, config_name: str) -> dict | None:
+def _log_norm_values(norm_stats: dict) -> None:
+    """Log normalization values used at inference time."""
+    for key in ("state", "actions"):
+        stats = norm_stats.get(key)
+        if stats is None:
+            logger.info("Normalization stats missing key: %s", key)
+            continue
+
+        for stat_name in ("mean", "std", "q01", "q99"):
+            value = stats.get(stat_name)
+            if value is None:
+                logger.info("norm_stats[%s][%s] = None", key, stat_name)
+            else:
+                logger.info("norm_stats[%s][%s] = %s", key, stat_name, np.array(value, dtype=np.float32))
+
+
+def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict | None, str | None]:
     """Load normalization statistics from checkpoint or config assets."""
     if checkpoint_path is None:
-        return None
+        raise ValueError(
+            f"Normalization stats are required for inference, but checkpoint_path is None (config={config_name})."
+        )
     
     # Try to find norm_stats.json in checkpoint assets
     checkpoint_dir = pathlib.Path(checkpoint_path)
@@ -77,10 +95,12 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> dict | Non
             logger.info(f"Loading norm_stats from: {path}")
             with open(path) as f:
                 data = json.load(f)
-                return data.get("norm_stats", data)
-    
-    logger.warning("No norm_stats found, skipping normalization")
-    return None
+                return data.get("norm_stats", data), str(path)
+
+    raise ValueError(
+        "No norm_stats found for inference. "
+        f"config={config_name}, checkpoint_path={checkpoint_path}, searched={[str(p) for p in search_paths]}"
+    )
 
 
 def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
@@ -187,6 +207,7 @@ class AsyncPi05WebSocketServer:
         )
         self.clients = set()
         self.norm_stats = None  # Will be loaded during initialization
+        self.norm_stats_path = None
 
     async def register_client(self, websocket: WebSocketServerProtocol):
         """Register new client"""
@@ -385,11 +406,12 @@ class AsyncPi05WebSocketServer:
             logger.info("Inference engine initialization completed")
             
             # Load normalization stats
-            self.norm_stats = load_norm_stats(self.checkpoint_path, self.config_name)
-            if self.norm_stats:
-                logger.info(f"Loaded normalization stats for state ({len(self.norm_stats.get('state', {}).get('mean', []))}D) and actions ({len(self.norm_stats.get('actions', {}).get('mean', []))}D)")
-            else:
-                logger.warning("No normalization stats loaded - state and actions will not be normalized")
+            self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
+            logger.info("Normalization file loaded from: %s", self.norm_stats_path)
+            logger.info(
+                f"Loaded normalization stats for state ({len(self.norm_stats.get('state', {}).get('mean', []))}D) and actions ({len(self.norm_stats.get('actions', {}).get('mean', []))}D)"
+            )
+            _log_norm_values(self.norm_stats)
 
         # Start WebSocket server
         logger.info("Starting WebSocket listener...")
