@@ -272,6 +272,7 @@ class Pi05(_model.BaseModel):
 
         # ⭐ 2. Flow Matching Loss (MSE Loss for continuous actions)
         if self.flow_matching_loss_weight > 0:
+<<<<<<< Updated upstream
             # Ensure we have kv_cache from token generation, or compute prefix if not
             if kv_cache is None:
                 prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
@@ -282,6 +283,40 @@ class Pi05(_model.BaseModel):
                     mask=prefix_attn_mask,
                     positions=prefix_positions,
                     adarms_cond=[None, None],
+=======
+            # During hybrid training, remove Ground Truth FAST action tokens from flow-conditioning prefix.
+            flow_observation = observation
+            action_region_mask = getattr(observation, "action_region_mask", None)
+            
+            # Mask out action tokens when training with flow matching loss.
+            # This is necessary because during hybrid training (both FAST token loss and flow matching loss),
+            # the flow matching model should not see the ground truth action tokens in the prompt.
+            # If it did, it would be "cheating" - the model should learn to predict actions based on
+            # the subtask/context alone, not by conditioning on the ground truth action tokens.
+            # We only mask when:
+            #   - FAST token loss is enabled (hybrid training scenario)
+            #   - Action region mask is available (to identify which tokens to mask)
+            #   - Tokenized prompt exists (to mask tokens from)
+            if (
+                self.fast_token_loss_weight > 0
+                and action_region_mask is not None
+                and observation.tokenized_prompt is not None
+                and observation.tokenized_prompt_mask is not None
+            ):
+                # Zero out action tokens and disable their masks so they don't affect flow matching
+                flow_tokenized_prompt = jnp.where(action_region_mask, 0, observation.tokenized_prompt)
+                flow_tokenized_prompt_mask = jnp.where(action_region_mask, False, observation.tokenized_prompt_mask)
+                flow_observation = _model.Observation(
+                    images=observation.images,
+                    image_masks=observation.image_masks,
+                    state=observation.state,
+                    tokenized_prompt=flow_tokenized_prompt,
+                    tokenized_prompt_mask=flow_tokenized_prompt_mask,
+                    token_ar_mask=observation.token_ar_mask,
+                    token_loss_mask=observation.token_loss_mask,
+                    subtask_region_mask=observation.subtask_region_mask,
+                    action_region_mask=observation.action_region_mask,
+>>>>>>> Stashed changes
                 )
 
             preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)

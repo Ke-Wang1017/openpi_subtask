@@ -38,11 +38,10 @@ e
 ### Run LIBERO subtask evaluation (sync server + sync client)
 First see the [LIBERO README](README.md) to setup the environment. Then run:
 
-
 ### Start the sync Pi0.5 server
 ```bash
 export OPENPI_DATA_HOME=$HOME/.cache/openpi
-python scripts/async_pi05_websocket_server.py \
+python scripts/async_pi05/sync_pi05_websocket_server.py \
   --config libero_pi05_action_expert \
   --checkpoint PATH_TO_CHECKPOINT \
   --gpu-id 0 \
@@ -58,4 +57,33 @@ export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 ```
 ```bash
 python examples/libero/main_subtask.py --host 127.0.0.1 --port 8765
+```
+
+### Run async Pi0.5 server/client commands
+Use these commands when you want the true asynchronous websocket stack:
+
+```bash
+export OPENPI_DATA_HOME=$HOME/.cache/openpi
+python scripts/async_pi05/async_pi05_websocket_server.py \
+  --config libero_pi05_action_expert \
+  --checkpoint PATH_TO_CHECKPOINT \
+  --gpu-id 0 \
+  --host 0.0.0.0 \
+  --port 8765
+```
+
+```bash
+python scripts/async_pi05/async_pi05_client.py \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --high-level-prompt "Pick up the flashcard on the table"
+```
+
+### Run async LIBERO evaluation client
+If you want LIBERO rollout evaluation with async websocket requests, run:
+
+```bash
+source examples/libero/.venv/bin/activate
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+python examples/libero/main_subtask_async.py --host 127.0.0.1 --port 8765
 ```

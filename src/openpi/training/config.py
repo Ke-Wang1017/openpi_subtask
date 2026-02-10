@@ -787,8 +787,13 @@ _CONFIGS = [
             decay_steps=150_000,
             decay_lr=2.5e-6,
         ),
+<<<<<<< Updated upstream
         num_train_steps=60_000,
         save_interval=10000,
+=======
+        num_train_steps=40_000,
+        save_interval=5000,
+>>>>>>> Stashed changes
         batch_size=64,
         fsdp_devices=1,
         ema_decay=0.999,
