@@ -136,19 +136,11 @@ class AsyncPi05Inference:
     ) -> Observation:
         """Prepare model-ready observation data."""
         img_dict = {}
-<<<<<<< Updated upstream
-=======
         image_mask_dict = {}
 
->>>>>>> Stashed changes
         for key, img in images.items():
             img_array = np.asarray(img, dtype=np.uint8)
             img_dict[key] = jnp.array(img_array[np.newaxis, :, :, :])
-<<<<<<< Updated upstream
-
-        # Prepare state data
-        state = jnp.zeros((1, 32), dtype=jnp.float32) if state is None else jnp.array(state)[np.newaxis, :]
-=======
             image_mask_dict[key] = jnp.array([not (key == "right_wrist_0_rgb" and not np.any(img_array))], dtype=jnp.bool_)
 
         if state is None:
@@ -161,7 +153,6 @@ class AsyncPi05Inference:
                 state_vec = state_vec[:32]
 
         state_batch = jnp.asarray(state_vec, dtype=jnp.float32)[np.newaxis, :]
->>>>>>> Stashed changes
 
         (
             tokenized_prompt,
@@ -170,13 +161,8 @@ class AsyncPi05Inference:
             token_loss_mask,
             _subtask_region_mask,
             _action_region_mask,
-<<<<<<< Updated upstream
-        ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state)
-        # Build observation data
-=======
         ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state_vec)
 
->>>>>>> Stashed changes
         data = {
             "image": img_dict,
             "image_mask": {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict},
@@ -524,71 +510,8 @@ async def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-<<<<<<< Updated upstream
-    # Ensure module logger also displays logs
-    logger.setLevel(logging.INFO)
-
-    # Create inference server
-    inference_server = AsyncPi05Inference(config_name="right_pi05_20", gpu_id=1)
-
-    # Prepare test images
-    img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]
-    images = {}
-
-    for i, img_name in enumerate(img_name_list):
-        img_path = img_name
-        img = inference_server.load_image_with_fallback(img_path, img_name)
-        key = ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"][i]
-        images[key] = img
-
-    # Test inference
-    high_level_prompt = "Pick up the flashcard on the table"
-    low_level_prompt = ""
-
-    print("Starting asynchronous inference test...")
-    results = await inference_server.infer(
-        images=images,
-        high_level_prompt=high_level_prompt,
-        low_level_prompt=low_level_prompt,
-        generate_subtask=True,
-        max_decoding_steps=200,
-        temperature=0.1,
-        subtask_refresh_interval=0.5,  # Refresh every 2 seconds
-    )
-
-    print("Inference results:")
-    if results["actions"] is not None:
-        print(f"Generated action shape: {results['actions'].shape}")
-    print(f"Generated subtask: {results['subtask']}")
-    print(f"Timing info: {results['timing']}")
-
-    # Start continuous action generation (parallel with subtask refresh)
-    print("Starting continuous action generation...")
-    action_task = asyncio.create_task(
-        inference_server.start_continuous_action_generation(
-            images=images,
-            high_level_prompt=high_level_prompt,
-            low_level_prompt=low_level_prompt,
-            action_interval=0.5,  # Generate one action every 0.5 seconds
-            max_actions=20,
-        )
-    )
-
-    # Wait for both tasks to run for a period
-    print("Waiting for subtask refresh and action generation...")
-    await asyncio.sleep(10000000000000000000000000)  # Wait 10 seconds, observe both processes
-
-    # Cancel all tasks
-    if "subtask_refresh_task" in results:
-        results["subtask_refresh_task"].cancel()
-        print("Cancelled subtask refresh task")
-
-    action_task.cancel()
-    print("Cancelled continuous action generation task")
-=======
     inference_server = AsyncPi05Inference(config_name="libero_pi05_subtask_hybrid", gpu_id=1)
     await inference_server.initialize()
->>>>>>> Stashed changes
 
 
 if __name__ == "__main__":

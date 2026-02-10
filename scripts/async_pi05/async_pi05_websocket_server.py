@@ -42,14 +42,6 @@ def map_image_keys_to_model(images: dict[str, np.ndarray]) -> dict[str, np.ndarr
     return mapped
 
 
-<<<<<<< Updated upstream
-def load_norm_stats(checkpoint_path: str | None, config_name: str) -> dict | None:
-    """Load normalization statistics from checkpoint or config assets."""
-    if checkpoint_path is None:
-        return None
-    
-    # Try to find norm_stats.json in checkpoint assets
-=======
 def _log_norm_values(norm_stats: dict) -> None:
     """Log normalization values used at inference time."""
     for key in ("state", "actions"):
@@ -73,7 +65,6 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict
             f"Normalization stats are required for inference, but checkpoint_path is None (config={config_name})."
         )
 
->>>>>>> Stashed changes
     checkpoint_dir = pathlib.Path(checkpoint_path)
     if checkpoint_dir.is_file():
         checkpoint_dir = checkpoint_dir.parent
@@ -93,25 +84,10 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict
     return None
 
 
-<<<<<<< Updated upstream
-def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
-    """Normalize state using quantile stats from norm_stats and pad to expected dimension.
-    
-    Args:
-        state: Raw state array (e.g., 8D for LIBERO)
-        norm_stats: Dictionary with 'state' key containing 'q01', 'q99' (and 'mean', 'std')
-        pad_to_dim: Dimension to pad state to (default 8 for Pi05 model)
-        use_quantiles: If True, use quantile normalization. Otherwise, use z-score.
-    
-    Returns:
-        Normalized and padded state array
-    """
-=======
 def normalize_state(state: np.ndarray, norm_stats: dict | None, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
     """Normalize state and pad to model dimension."""
     state = np.asarray(state, dtype=np.float32)
 
->>>>>>> Stashed changes
     if norm_stats is None or "state" not in norm_stats:
         if state.shape[-1] < pad_to_dim:
             pad_width = [(0, 0)] * (state.ndim - 1) + [(0, pad_to_dim - state.shape[-1])]
@@ -193,10 +169,6 @@ class AsyncPi05WebSocketServer:
             gpu_id=gpu_id,
             checkpoint_path=checkpoint_path,
         )
-<<<<<<< Updated upstream
-        self.clients = set()
-        self.norm_stats = None  # Will be loaded during initialization
-=======
 
         self.clients: set[WebSocketServerProtocol] = set()
         self.norm_stats: dict[str, Any] | None = None
@@ -209,7 +181,6 @@ class AsyncPi05WebSocketServer:
         lock = self.send_locks.setdefault(websocket, asyncio.Lock())
         async with lock:
             await websocket.send(json.dumps(payload))
->>>>>>> Stashed changes
 
     async def register_client(self, websocket: WebSocketServerProtocol):
         self.clients.add(websocket)
@@ -277,23 +248,8 @@ class AsyncPi05WebSocketServer:
         low_level_prompt = request.get("low_level_prompt", "")
         state = request.get("state")
 
-<<<<<<< Updated upstream
-            # Convert state data, normalize (quantile), and pad to 8D
-            state_array = None
-            if state is not None:
-                raw_state = np.array(state, dtype=np.float32)
-                # Log raw gripper state (last 2 dims of 8D state)
-                if len(raw_state) >= 8:
-                    print(f"[GRIPPER DEBUG] Raw gripper state (dims 6-7): {raw_state[6:8]}")
-                # Apply quantile normalization and padding
-                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=8, use_quantiles=True)
-                if len(raw_state) >= 8:
-                    print(f"[GRIPPER DEBUG] Quantile-normalized gripper state (dims 6-7): {state_array[6:8]}")
-                print(f"[GRIPPER DEBUG] Full normalized state shape: {state_array.shape}")
-=======
         generate_subtask = request.get("generate_subtask", True)
         generate_actions = request.get("generate_actions", True)
->>>>>>> Stashed changes
 
         max_decoding_steps = int(request.get("max_decoding_steps", 25))
         temperature = float(request.get("temperature", 0.1))
@@ -463,15 +419,6 @@ class AsyncPi05WebSocketServer:
             logger.info("Initializing inference engine (this may take a while)...")
             await self.inference_engine.initialize()
             logger.info("Inference engine initialization completed")
-<<<<<<< Updated upstream
-            
-            # Load normalization stats
-            self.norm_stats = load_norm_stats(self.checkpoint_path, self.config_name)
-            if self.norm_stats:
-                logger.info(f"Loaded normalization stats for state ({len(self.norm_stats.get('state', {}).get('mean', []))}D) and actions ({len(self.norm_stats.get('actions', {}).get('mean', []))}D)")
-            else:
-                logger.warning("No normalization stats loaded - state and actions will not be normalized")
-=======
 
             self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
             logger.info("Normalization file loaded from: %s", self.norm_stats_path)
@@ -481,7 +428,6 @@ class AsyncPi05WebSocketServer:
                 len(self.norm_stats.get("actions", {}).get("mean", [])),
             )
             _log_norm_values(self.norm_stats)
->>>>>>> Stashed changes
 
         server = await websockets.serve(
             self.handle_client,

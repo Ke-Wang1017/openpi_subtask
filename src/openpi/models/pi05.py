@@ -272,18 +272,6 @@ class Pi05(_model.BaseModel):
 
         # ⭐ 2. Flow Matching Loss (MSE Loss for continuous actions)
         if self.flow_matching_loss_weight > 0:
-<<<<<<< Updated upstream
-            # Ensure we have kv_cache from token generation, or compute prefix if not
-            if kv_cache is None:
-                prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-                prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-                prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
-                (_, _), kv_cache = self.PaliGemma.llm(
-                    [prefix_token_embeddings, None],
-                    mask=prefix_attn_mask,
-                    positions=prefix_positions,
-                    adarms_cond=[None, None],
-=======
             # During hybrid training, remove Ground Truth FAST action tokens from flow-conditioning prefix.
             flow_observation = observation
             action_region_mask = getattr(observation, "action_region_mask", None)
@@ -316,7 +304,6 @@ class Pi05(_model.BaseModel):
                     token_loss_mask=observation.token_loss_mask,
                     subtask_region_mask=observation.subtask_region_mask,
                     action_region_mask=observation.action_region_mask,
->>>>>>> Stashed changes
                 )
 
             preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
