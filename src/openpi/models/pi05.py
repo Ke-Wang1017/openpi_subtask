@@ -219,7 +219,6 @@ class Pi05(_model.BaseModel):
         )
 
         total_loss = 0.0
-        kv_cache = None
 
         # ⭐ 1. Token Generation Loss (Subtask and/or FAST action tokens - computed separately)
         if self.subtask_loss_weight > 0 or self.fast_token_loss_weight > 0:
@@ -269,29 +268,23 @@ class Pi05(_model.BaseModel):
                     action_mask = action_mask[:, 1:]  # Shift for next-token prediction
                     action_loss = -jnp.sum(token_pplx * action_mask, axis=-1) / jnp.clip(jnp.sum(action_mask, -1), 1)
                     total_loss = total_loss + self.fast_token_loss_weight * action_loss
+                else:
+                    # Fallback: use overall loss_mask if region masks are not available.
+                    loss_mask = observation.token_loss_mask[:, 1:]
+                    action_loss = -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+                    total_loss = total_loss + self.fast_token_loss_weight * action_loss
 
         # ⭐ 2. Flow Matching Loss (MSE Loss for continuous actions)
         if self.flow_matching_loss_weight > 0:
-            # During hybrid training, remove Ground Truth FAST action tokens from flow-conditioning prefix.
+            # During hybrid training, remove GT FAST action tokens from flow-conditioning prefix.
             flow_observation = observation
             action_region_mask = getattr(observation, "action_region_mask", None)
-            
-            # Mask out action tokens when training with flow matching loss.
-            # This is necessary because during hybrid training (both FAST token loss and flow matching loss),
-            # the flow matching model should not see the ground truth action tokens in the prompt.
-            # If it did, it would be "cheating" - the model should learn to predict actions based on
-            # the subtask/context alone, not by conditioning on the ground truth action tokens.
-            # We only mask when:
-            #   - FAST token loss is enabled (hybrid training scenario)
-            #   - Action region mask is available (to identify which tokens to mask)
-            #   - Tokenized prompt exists (to mask tokens from)
             if (
                 self.fast_token_loss_weight > 0
                 and action_region_mask is not None
                 and observation.tokenized_prompt is not None
                 and observation.tokenized_prompt_mask is not None
             ):
-                # Zero out action tokens and disable their masks so they don't affect flow matching
                 flow_tokenized_prompt = jnp.where(action_region_mask, 0, observation.tokenized_prompt)
                 flow_tokenized_prompt_mask = jnp.where(action_region_mask, False, observation.tokenized_prompt_mask)
                 flow_observation = _model.Observation(
@@ -306,7 +299,18 @@ class Pi05(_model.BaseModel):
                     action_region_mask=observation.action_region_mask,
                 )
 
-            preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+            # Always build a dedicated prefix cache for flow matching.
+            prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(flow_observation)
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            (_, _), kv_cache = self.PaliGemma.llm(
+                [prefix_token_embeddings, None],
+                mask=prefix_attn_mask,
+                positions=prefix_positions,
+                adarms_cond=[None, None],
+            )
+
+            noise_rng, time_rng = jax.random.split(rng, 2)
             batch_shape = actions.shape[:-2]
             noise = jax.random.normal(noise_rng, actions.shape)
             time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
@@ -314,9 +318,7 @@ class Pi05(_model.BaseModel):
             x_t = time_expanded * noise + (1 - time_expanded) * actions
             u_t = noise - actions
 
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-            if "prefix_mask" not in locals():
-                prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(flow_observation, x_t, time)
             input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
             ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
             attn_mask = make_attn_mask(input_mask, ar_mask)

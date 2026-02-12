@@ -59,12 +59,13 @@ def _log_norm_values(norm_stats: dict) -> None:
 
 
 def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict | None, str | None]:
-    """Load normalization statistics from checkpoint assets."""
+    """Load normalization statistics from checkpoint or config assets."""
     if checkpoint_path is None:
         raise ValueError(
             f"Normalization stats are required for inference, but checkpoint_path is None (config={config_name})."
         )
-
+    
+    # Try to find norm_stats.json in checkpoint assets
     checkpoint_dir = pathlib.Path(checkpoint_path)
     if checkpoint_dir.is_file():
         checkpoint_dir = checkpoint_dir.parent
@@ -78,16 +79,26 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict
             logger.info("Loading norm_stats from: %s", path)
             with open(path) as f:
                 data = json.load(f)
-                return data.get("norm_stats", data)
+                return data.get("norm_stats", data), str(path)
+
+    raise ValueError(
+        "No norm_stats found for inference. "
+        f"config={config_name}, checkpoint_path={checkpoint_path}, searched={[str(p) for p in search_paths]}"
+    )
+
+
+def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
+    """Normalize state using quantile stats from norm_stats and pad to expected dimension.
     
-    logger.warning("No norm_stats found, skipping normalization")
-    return None
-
-
-def normalize_state(state: np.ndarray, norm_stats: dict | None, pad_to_dim: int = 32, use_quantiles: bool = True) -> np.ndarray:
-    """Normalize state and pad to model dimension."""
-    state = np.asarray(state, dtype=np.float32)
-
+    Args:
+        state: Raw state array (e.g., 8D for LIBERO)
+        norm_stats: Dictionary with 'state' key containing 'q01', 'q99' (and 'mean', 'std')
+        pad_to_dim: Dimension to pad state to (default 32 for Pi05 model action_dim)
+        use_quantiles: If True, use quantile normalization. Otherwise, use z-score.
+    
+    Returns:
+        Normalized and padded state array
+    """
     if norm_stats is None or "state" not in norm_stats:
         if state.shape[-1] < pad_to_dim:
             pad_width = [(0, 0)] * (state.ndim - 1) + [(0, pad_to_dim - state.shape[-1])]
@@ -155,7 +166,7 @@ class AsyncPi05WebSocketServer:
         self,
         host: str = "0.0.0.0",
         port: int = 8765,
-        config_name: str = "right_pi05_20",
+        config_name: str = "libero_pi05_subtask_hybrid",
         gpu_id: int = 1,
         checkpoint_path: str | None = None,
     ):
@@ -169,18 +180,9 @@ class AsyncPi05WebSocketServer:
             gpu_id=gpu_id,
             checkpoint_path=checkpoint_path,
         )
-
-        self.clients: set[WebSocketServerProtocol] = set()
-        self.norm_stats: dict[str, Any] | None = None
-        self.norm_stats_path: str | None = None
-
-        self.active_refresh_tasks: dict[WebSocketServerProtocol, asyncio.Task] = {}
-        self.send_locks: dict[WebSocketServerProtocol, asyncio.Lock] = {}
-
-    async def _send_json(self, websocket: WebSocketServerProtocol, payload: dict[str, Any]) -> None:
-        lock = self.send_locks.setdefault(websocket, asyncio.Lock())
-        async with lock:
-            await websocket.send(json.dumps(payload))
+        self.clients = set()
+        self.norm_stats = None  # Will be loaded during initialization
+        self.norm_stats_path = None
 
     async def register_client(self, websocket: WebSocketServerProtocol):
         self.clients.add(websocket)
@@ -236,45 +238,63 @@ class AsyncPi05WebSocketServer:
         finally:
             await self.unregister_client(websocket)
 
-    async def process_request(self, websocket: WebSocketServerProtocol, request: dict[str, Any]) -> dict[str, Any]:
-        """Process one request; supports subtask/action generation and refresh scheduling."""
-        if "images" not in request or "high_level_prompt" not in request:
-            return {"error": "Missing required fields: images, high_level_prompt", "status": "error"}
+    async def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Process inference request - generates subtask first, then actions.
+        
+        This is a simplified synchronous approach where:
+        1. Subtask is generated from high-level prompt
+        2. Actions are generated using the subtask as low-level prompt
+        3. Both subtask and actions are returned in one response
+        """
+        try:
+            # Validate request format
+            if "images" not in request or "high_level_prompt" not in request:
+                return {"error": "Missing required fields: images, high_level_prompt", "status": "error"}
 
-        request_id = request.get("request_id")
+            # Extract request parameters
+            images_data = request["images"]
+            high_level_prompt = request["high_level_prompt"]
+            state = request.get("state")
+            max_decoding_steps = request.get("max_decoding_steps", 25)
+            temperature = request.get("temperature", 0.1)
+            noise = request.get("noise")
 
-        images_data = request["images"]
-        high_level_prompt = request["high_level_prompt"]
-        low_level_prompt = request.get("low_level_prompt", "")
-        state = request.get("state")
+            # Convert image data
+            images = {}
+            for key, img_data in images_data.items():
+                if isinstance(img_data, list):
+                    img_array = np.array(img_data, dtype=np.uint8)
+                else:
+                    img_array = np.array(img_data, dtype=np.uint8)
+                images[key] = img_array
+            
+            # Map input keys to model keys (base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb)
+            # This matches LiberoInputs/LiberoSubtaskInputs format
+            images = map_image_keys_to_model(images)
+            print(f"[DEBUG] Mapped image keys: {list(images.keys())}")
 
-        generate_subtask = request.get("generate_subtask", True)
-        generate_actions = request.get("generate_actions", True)
+            # Convert state data, normalize (quantile), and pad to 32D (training-time model action dim)
+            state_array = None
+            if state is not None:
+                raw_state = np.array(state, dtype=np.float32)
+                # Log raw gripper state (last 2 dims of 8D state)
+                if len(raw_state) >= 8:
+                    print(f"[GRIPPER DEBUG] Raw gripper state (dims 6-7): {raw_state[6:8]}")
+                # Apply quantile normalization and padding
+                state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=32, use_quantiles=True)
+                if len(raw_state) >= 8:
+                    print(f"[GRIPPER DEBUG] Quantile-normalized gripper state (dims 6-7): {state_array[6:8]}")
+                print(f"[GRIPPER DEBUG] Full normalized state shape: {state_array.shape}")
 
-        max_decoding_steps = int(request.get("max_decoding_steps", 25))
-        temperature = float(request.get("temperature", 0.1))
-        noise = request.get("noise")
-        subtask_refresh_interval = request.get("subtask_refresh_interval")
+            # Convert noise data
+            noise_array = None
+            if noise is not None:
+                noise_array = np.array(noise, dtype=np.float32)
 
-        images = {key: np.array(img_data, dtype=np.uint8) for key, img_data in images_data.items()}
-        images = map_image_keys_to_model(images)
+            start_time = time.time()
 
-        state_array = None
-        if state is not None:
-            raw_state = np.array(state, dtype=np.float32)
-            state_array = normalize_state(raw_state, self.norm_stats, pad_to_dim=32, use_quantiles=True)
-
-        noise_array = np.array(noise, dtype=np.float32) if noise is not None else None
-
-        start_time = time.time()
-        subtask = None
-        subtask_tokens = None
-        state_result = None
-        actions = None
-        subtask_ms = 0.0
-        action_ms = 0.0
-
-        if generate_subtask:
+            # Step 1: Generate subtask from high-level prompt
+            logger.info(f"Generating subtask for: {high_level_prompt}")
             subtask_start = time.time()
             subtask_result = await self.inference_engine.infer(
                 images=images,
@@ -419,6 +439,14 @@ class AsyncPi05WebSocketServer:
             logger.info("Initializing inference engine (this may take a while)...")
             await self.inference_engine.initialize()
             logger.info("Inference engine initialization completed")
+            
+            # Load normalization stats
+            self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
+            logger.info("Normalization file loaded from: %s", self.norm_stats_path)
+            logger.info(
+                f"Loaded normalization stats for state ({len(self.norm_stats.get('state', {}).get('mean', []))}D) and actions ({len(self.norm_stats.get('actions', {}).get('mean', []))}D)"
+            )
+            _log_norm_values(self.norm_stats)
 
             self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
             logger.info("Normalization file loaded from: %s", self.norm_stats_path)
@@ -453,7 +481,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Async Pi0.5 WebSocket Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Listen address")
     parser.add_argument("--port", type=int, default=8765, help="Listen port")
-    parser.add_argument("--config", type=str, default="libero_pi05_action_expert", help="Model config name")
+    parser.add_argument("--config", type=str, default="libero_pi05_subtask_hybrid", help="Model config name")
     parser.add_argument("--gpu-id", type=int, default=0, help="GPU ID, use -1 for CPU")
     parser.add_argument(
         "--checkpoint",

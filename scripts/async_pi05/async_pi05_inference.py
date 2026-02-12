@@ -33,7 +33,12 @@ class AsyncPi05Inference:
     """Asynchronous Pi0.5 inference engine， support subtask generation 
     and action prediction."""
 
-    def __init__(self, config_name: str = "right_pi05_20", gpu_id: int = 1, checkpoint_path: str | None = None):
+    def __init__(
+        self,
+        config_name: str = "libero_pi05_subtask_hybrid",
+        gpu_id: int = 1,
+        checkpoint_path: str | None = None,
+    ):
         self.config_name = config_name
         self.gpu_id = gpu_id
         self.checkpoint_path = checkpoint_path
@@ -137,12 +142,15 @@ class AsyncPi05Inference:
         """Prepare model-ready observation data."""
         img_dict = {}
         image_mask_dict = {}
-
         for key, img in images.items():
             img_array = np.asarray(img, dtype=np.uint8)
             img_dict[key] = jnp.array(img_array[np.newaxis, :, :, :])
-            image_mask_dict[key] = jnp.array([not (key == "right_wrist_0_rgb" and not np.any(img_array))], dtype=jnp.bool_)
+            # Match training behavior: zeroed right wrist placeholder should be masked out.
+            image_mask_dict[key] = jnp.array(
+                [not (key == "right_wrist_0_rgb" and not np.any(img_array))], dtype=jnp.bool_
+            )
 
+        # Prepare state data
         if state is None:
             state_vec = np.zeros((32,), dtype=np.float32)
         else:
@@ -151,7 +159,6 @@ class AsyncPi05Inference:
                 state_vec = np.pad(state_vec, ((0, 32 - state_vec.shape[0])), constant_values=0.0)
             elif state_vec.shape[0] > 32:
                 state_vec = state_vec[:32]
-
         state_batch = jnp.asarray(state_vec, dtype=jnp.float32)[np.newaxis, :]
 
         (
@@ -162,11 +169,11 @@ class AsyncPi05Inference:
             _subtask_region_mask,
             _action_region_mask,
         ) = self.tokenizer.tokenize_high_low_prompt(high_level_prompt, low_level_prompt, state_vec)
-
+        # Build observation data
         data = {
             "image": img_dict,
-            "image_mask": {key: jnp.ones(1, dtype=jnp.bool) for key in img_dict},
-            "state": state,
+            "image_mask": image_mask_dict,
+            "state": state_batch,
             "tokenized_prompt": jnp.stack([tokenized_prompt], axis=0),
             "tokenized_prompt_mask": jnp.stack([tokenized_prompt_mask], axis=0),
             "token_ar_mask": jnp.stack([token_ar_mask], axis=0),
@@ -195,6 +202,8 @@ class AsyncPi05Inference:
                 tokenized_prompt_mask=new_tokenized_prompt_mask,
                 token_ar_mask=observation.token_ar_mask,
                 token_loss_mask=observation.token_loss_mask,
+                subtask_region_mask=observation.subtask_region_mask,
+                action_region_mask=observation.action_region_mask,
             )
 
             observation = _model.preprocess_observation(
@@ -506,8 +515,38 @@ class AsyncPi05Inference:
 async def main():
     """Quick smoke test entrypoint."""
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Ensure module logger also displays logs
+    logger.setLevel(logging.INFO)
+
+    # Create inference server
+    inference_server = AsyncPi05Inference(config_name="libero_pi05_subtask_hybrid", gpu_id=1)
+
+    # Prepare test images
+    img_name_list = ["faceImg.png", "leftImg.png", "rightImg.png"]
+    images = {}
+
+    for i, img_name in enumerate(img_name_list):
+        img_path = img_name
+        img = inference_server.load_image_with_fallback(img_path, img_name)
+        key = ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"][i]
+        images[key] = img
+
+    # Test inference
+    high_level_prompt = "Pick up the flashcard on the table"
+    low_level_prompt = ""
+
+    print("Starting asynchronous inference test...")
+    results = await inference_server.infer(
+        images=images,
+        high_level_prompt=high_level_prompt,
+        low_level_prompt=low_level_prompt,
+        generate_subtask=True,
+        max_decoding_steps=200,
+        temperature=0.1,
+        subtask_refresh_interval=0.5,  # Refresh every 2 seconds
     )
 
     inference_server = AsyncPi05Inference(config_name="libero_pi05_subtask_hybrid", gpu_id=1)

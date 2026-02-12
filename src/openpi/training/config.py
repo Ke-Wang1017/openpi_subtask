@@ -763,12 +763,12 @@ _CONFIGS = [
         exp_name="libero_subtask_hybrid",
         model=pi05_config.Pi05Config(
             action_horizon=20,
-            max_token_len=256,
+            max_token_len=192,
             discrete_state_input=False,
             # ⭐ Use all three losses
-            subtask_loss_weight=0.1,
-            fast_token_loss_weight=0.1,  # Lower weight for FAST tokens
-            flow_matching_loss_weight=1.5,  # Lower weight for flow matching
+            subtask_loss_weight=0.15,
+            fast_token_loss_weight=0.15,  # Lower weight for FAST tokens
+            flow_matching_loss_weight=1.0,  # Lower weight for flow matching
             fast_tokenizer_path="physical-intelligence/fast",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
