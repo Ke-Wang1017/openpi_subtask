@@ -7,21 +7,24 @@ import pathlib
 import time
 from typing import Any
 
-from async_pi05_inference import AsyncPi05Inference
+from sync_pi05_inference import SyncPi05Inference
+import jax
 import numpy as np
 import websockets
 from websockets.server import WebSocketServerProtocol
 
 logger = logging.getLogger(__name__)
 
-# Image key mapping: Various input keys -> Model keys.
-# Model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+# Image key mapping: Various input keys -> Model keys
+# LiberoSubtaskInputs now uses the same keys as LiberoInputs:
+#   base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+# Client can send either LIBERO-style or model-style keys, server maps to model keys.
 INPUT_TO_MODEL_IMAGE_KEYS = {
     # LIBERO-style keys -> Model keys
     "agentview_rgb": "base_0_rgb",
     "wrist_rgb_left": "left_wrist_0_rgb",
-    "wrist_rgb": "left_wrist_0_rgb",
-    # Model-style keys (pass-through)
+    "wrist_rgb": "left_wrist_0_rgb",  # Alternative name
+    # Model-style keys (pass through)
     "base_0_rgb": "base_0_rgb",
     "left_wrist_0_rgb": "left_wrist_0_rgb",
     "right_wrist_0_rgb": "right_wrist_0_rgb",
@@ -29,16 +32,25 @@ INPUT_TO_MODEL_IMAGE_KEYS = {
 
 
 def map_image_keys_to_model(images: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Map input image keys to model keys and inject a right wrist placeholder when missing."""
+    """Map input image keys to model keys (matching LiberoInputs/LiberoSubtaskInputs).
+    
+    The model expects: base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb
+    LIBERO datasets use: agentview_rgb, wrist_rgb_left
+    
+    This function maps any input key format to the model format and adds
+    a zeroed right_wrist_0_rgb placeholder if not provided.
+    """
     mapped = {}
     for key, value in images.items():
-        mapped[INPUT_TO_MODEL_IMAGE_KEYS.get(key, key)] = value
-
-    # LIBERO normally has only two cameras.
-    if "right_wrist_0_rgb" not in mapped and mapped:
+        new_key = INPUT_TO_MODEL_IMAGE_KEYS.get(key, key)
+        mapped[new_key] = value
+    
+    # Add zeroed right_wrist_0_rgb if not present (LIBERO only has 2 cameras)
+    if "right_wrist_0_rgb" not in mapped and len(mapped) > 0:
         template = next(iter(mapped.values()))
         mapped["right_wrist_0_rgb"] = np.zeros_like(template)
-
+        logger.debug("Added zeroed right_wrist_0_rgb placeholder")
+    
     return mapped
 
 
@@ -69,14 +81,18 @@ def load_norm_stats(checkpoint_path: str | None, config_name: str) -> tuple[dict
     checkpoint_dir = pathlib.Path(checkpoint_path)
     if checkpoint_dir.is_file():
         checkpoint_dir = checkpoint_dir.parent
-
+    
+    # Common locations for norm_stats
     search_paths = [
         checkpoint_dir / "assets" / "KeWangRobotics" / "libero_10_subtasks" / "norm_stats.json",
+        # checkpoint_dir / "assets" / "libero_subtask" / "norm_stats.json",
+        # checkpoint_dir / "norm_stats.json",
+        # pathlib.Path(os.path.expanduser("~/.cache/openpi/openpi-assets")) / config_name / "KeWangRobotics" / "libero_10_subtasks" / "norm_stats.json",
     ]
-
+    
     for path in search_paths:
         if path.exists():
-            logger.info("Loading norm_stats from: %s", path)
+            logger.info(f"Loading norm_stats from: {path}")
             with open(path) as f:
                 data = json.load(f)
                 return data.get("norm_stats", data), str(path)
@@ -100,67 +116,77 @@ def normalize_state(state: np.ndarray, norm_stats: dict, pad_to_dim: int = 32, u
         Normalized and padded state array
     """
     if norm_stats is None or "state" not in norm_stats:
+        # Still need to pad even without normalization
         if state.shape[-1] < pad_to_dim:
             pad_width = [(0, 0)] * (state.ndim - 1) + [(0, pad_to_dim - state.shape[-1])]
             state = np.pad(state, pad_width, constant_values=0.0)
         return state
-
+    
     stats = norm_stats["state"]
     normalized = state.copy().astype(np.float32)
-
+    
     if use_quantiles:
+        # Quantile normalization: (x - q01) / (q99 - q01) * 2 - 1 -> maps to [-1, 1]
         q01 = np.array(stats["q01"], dtype=np.float32)
         q99 = np.array(stats["q99"], dtype=np.float32)
         state_dim = min(state.shape[-1], len(q01))
-        normalized[..., :state_dim] = (
-            (state[..., :state_dim] - q01[:state_dim]) / (q99[:state_dim] - q01[:state_dim] + 1e-6) * 2.0 - 1.0
-        )
+        normalized[..., :state_dim] = (state[..., :state_dim] - q01[:state_dim]) / (q99[:state_dim] - q01[:state_dim] + 1e-6) * 2.0 - 1.0
     else:
+        # Z-score normalization
         mean = np.array(stats["mean"], dtype=np.float32)
         std = np.array(stats["std"], dtype=np.float32)
         state_dim = min(state.shape[-1], len(mean))
         normalized[..., :state_dim] = (state[..., :state_dim] - mean[:state_dim]) / (std[:state_dim] + 1e-6)
-
+    
+    # Pad to expected dimension (zeros for extra dimensions)
     if normalized.shape[-1] < pad_to_dim:
         pad_width = [(0, 0)] * (normalized.ndim - 1) + [(0, pad_to_dim - normalized.shape[-1])]
         normalized = np.pad(normalized, pad_width, constant_values=0.0)
-
+    
     return normalized
 
 
-def unnormalize_actions(actions: np.ndarray, norm_stats: dict | None, use_quantiles: bool = True) -> np.ndarray:
-    """Unnormalize model actions to action space."""
+def unnormalize_actions(actions: np.ndarray, norm_stats: dict, use_quantiles: bool = True) -> np.ndarray:
+    """Unnormalize actions using quantile stats from norm_stats.
+    
+    Args:
+        actions: Normalized action array from model output
+        norm_stats: Dictionary with 'actions' key containing 'q01', 'q99' (and 'mean', 'std')
+        use_quantiles: If True, use quantile unnormalization. Otherwise, use z-score.
+    
+    Returns:
+        Unnormalized action array in original action space
+    """
     if norm_stats is None or "actions" not in norm_stats:
         return actions
-
+    
     stats = norm_stats["actions"]
     unnormalized = actions.copy()
-
+    
     if use_quantiles:
+        # Quantile unnormalization: (x + 1) / 2 * (q99 - q01) + q01 -> maps from [-1, 1] to [q01, q99]
         q01 = np.array(stats["q01"], dtype=np.float32)
         q99 = np.array(stats["q99"], dtype=np.float32)
         action_dim = min(actions.shape[-1], len(q01))
-        unnormalized[..., :action_dim] = (
-            (actions[..., :action_dim] + 1.0) / 2.0 * (q99[:action_dim] - q01[:action_dim] + 1e-6)
-            + q01[:action_dim]
-        )
+        unnormalized[..., :action_dim] = (actions[..., :action_dim] + 1.0) / 2.0 * (q99[:action_dim] - q01[:action_dim] + 1e-6) + q01[:action_dim]
     else:
+        # Z-score unnormalization
         mean = np.array(stats["mean"], dtype=np.float32)
         std = np.array(stats["std"], dtype=np.float32)
         action_dim = min(actions.shape[-1], len(mean))
         unnormalized[..., :action_dim] = actions[..., :action_dim] * (std[:action_dim] + 1e-6) + mean[:action_dim]
-
+    
     return unnormalized
 
 
-def _to_list(value: Any) -> Any:
-    if value is None:
-        return None
-    return np.asarray(value).tolist()
-
-
-class AsyncPi05WebSocketServer:
-    """Truly asynchronous Pi0.5 inference WebSocket server for LIBERO."""
+class SyncPi05WebSocketServer:
+    """Pi0.5 inference server based on WebSocket.
+    
+    Simplified synchronous approach:
+    - Each request generates subtask first, then actions
+    - Returns both subtask and actions in one response
+    - Includes proper state normalization and action unnormalization
+    """
 
     def __init__(
         self,
@@ -174,8 +200,7 @@ class AsyncPi05WebSocketServer:
         self.port = port
         self.config_name = config_name
         self.checkpoint_path = checkpoint_path
-
-        self.inference_engine = AsyncPi05Inference(
+        self.inference_engine = SyncPi05Inference(
             config_name=config_name,
             gpu_id=gpu_id,
             checkpoint_path=checkpoint_path,
@@ -185,56 +210,58 @@ class AsyncPi05WebSocketServer:
         self.norm_stats_path = None
 
     async def register_client(self, websocket: WebSocketServerProtocol):
+        """Register new client"""
         self.clients.add(websocket)
-        self.send_locks.setdefault(websocket, asyncio.Lock())
-        logger.info("Client connected: %s", websocket.remote_address)
-
-    async def _cancel_refresh_task(self, websocket: WebSocketServerProtocol):
-        task = self.active_refresh_tasks.pop(websocket, None)
-        if task is None:
-            return
-
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        logger.info(f"Client connected: {websocket.remote_address}")
 
     async def unregister_client(self, websocket: WebSocketServerProtocol):
+        """Unregister client"""
         self.clients.discard(websocket)
-        self.send_locks.pop(websocket, None)
-        await self._cancel_refresh_task(websocket)
-        logger.info("Client disconnected: %s", websocket.remote_address)
+        logger.info(f"Client disconnected: {websocket.remote_address}")
 
     async def handle_client(self, websocket: WebSocketServerProtocol, path: str | None = None):
+        """Handle client connection"""
         await self.register_client(websocket)
 
         try:
+            # Send server metadata
             metadata = {
-                "server_type": "AsyncPi05Inference",
-                "version": "3.0.0",
-                "capabilities": ["subtask_generation", "action_prediction", "periodic_refresh"],
+                "server_type": "Pi05Inference",
+                "version": "2.0.0",
+                "capabilities": ["subtask_generation", "action_prediction"],
                 "max_decoding_steps": 25,
+                # Server accepts both LIBERO-style and model-style image keys
+                # Automatically adds zeroed right_wrist_0_rgb if not provided
                 "supported_image_types": ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"],
                 "alternative_image_types": ["agentview_rgb", "wrist_rgb_left"],
                 "normalization_enabled": self.norm_stats is not None,
-                "request_id_supported": True,
             }
-            await self._send_json(websocket, metadata)
+            await websocket.send(json.dumps(metadata))
 
             async for message in websocket:
                 try:
+                    # Parse request
                     request = json.loads(message)
-                    response = await self.process_request(websocket, request)
-                    await self._send_json(websocket, response)
+                    response = await self.process_request(request)
+
+                    # Send response
+                    await websocket.send(json.dumps(response))
+
                 except json.JSONDecodeError:
-                    await self._send_json(websocket, {"error": "Invalid JSON format", "status": "error"})
+                    error_response = {"error": "Invalid JSON format", "status": "error"}
+                    await websocket.send(json.dumps(error_response))
+
                 except Exception as e:
-                    logger.exception("Error processing request")
-                    await self._send_json(websocket, {"error": str(e), "status": "error"})
+                    logger.error(f"Error processing request: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    error_response = {"error": str(e), "status": "error"}
+                    await websocket.send(json.dumps(error_response))
 
         except websockets.exceptions.ConnectionClosed:
-            logger.info("Client connection closed: %s", websocket.remote_address)
+            logger.info(f"Client connection closed: {websocket.remote_address}")
+        except Exception as e:
+            logger.error(f"Error handling client: {e}")
         finally:
             await self.unregister_client(websocket)
 
@@ -296,147 +323,85 @@ class AsyncPi05WebSocketServer:
             # Step 1: Generate subtask from high-level prompt
             logger.info(f"Generating subtask for: {high_level_prompt}")
             subtask_start = time.time()
-            subtask_result = await self.inference_engine.infer(
+            subtask_results = await self.inference_engine.infer(
                 images=images,
                 high_level_prompt=high_level_prompt,
-                low_level_prompt=low_level_prompt,
+                low_level_prompt="",  # Empty for subtask generation
                 state=state_array,
                 generate_subtask=True,
                 max_decoding_steps=max_decoding_steps,
                 temperature=temperature,
                 noise=None,
             )
-            subtask_ms = (time.time() - subtask_start) * 1000
-            subtask = subtask_result.get("subtask", "")
-            subtask_tokens = subtask_result.get("subtask_tokens")
-            state_result = subtask_result.get("state")
-        else:
-            subtask = low_level_prompt
+            subtask_time = time.time() - subtask_start
+            
+            subtask = subtask_results.get("subtask", "")
+            logger.info(f"Generated subtask: {subtask}")
 
-        if generate_actions:
-            prompt_for_actions = subtask if subtask is not None else low_level_prompt
+            # Step 2: Generate actions using subtask as low-level prompt
+            logger.info(f"Generating actions with subtask: {subtask}")
             action_start = time.time()
-            action_result = await self.inference_engine.infer(
+            action_results = await self.inference_engine.infer(
                 images=images,
                 high_level_prompt=high_level_prompt,
-                low_level_prompt=prompt_for_actions,
+                low_level_prompt=subtask,  # Use generated subtask
                 state=state_array,
                 generate_subtask=False,
                 max_decoding_steps=max_decoding_steps,
                 temperature=temperature,
                 noise=noise_array,
             )
-            action_ms = (time.time() - action_start) * 1000
-            state_result = action_result.get("state", state_result)
-            actions = action_result.get("actions")
+            action_time = time.time() - action_start
+
+            total_time = time.time() - start_time
+
+            # Build response with both subtask and actions
+            actions = action_results["actions"]
+            
+            # Unnormalize actions using quantile normalization before returning
             if actions is not None:
-                actions = unnormalize_actions(np.asarray(actions), self.norm_stats, use_quantiles=True)
+                # Log raw model output gripper (dim 6) before unnormalization
+                raw_gripper = actions[0, 0, 6] if actions.ndim == 3 else actions[0, 6]
+                print(f"[GRIPPER DEBUG] Raw model gripper output (quantile-normalized, first action): {raw_gripper:.4f}")
+                actions = unnormalize_actions(actions, self.norm_stats, use_quantiles=True)
+                # Log unnormalized gripper action
+                unnorm_gripper = actions[0, 0, 6] if actions.ndim == 3 else actions[0, 6]
+                print(f"[GRIPPER DEBUG] Quantile-unnormalized gripper action (first action): {unnorm_gripper:.4f}")
+                print(f"[GRIPPER DEBUG] Actions shape: {actions.shape}")
+            
+            response = {
+                "status": "success",
+                "subtask": subtask,
+                "actions": actions.tolist() if actions is not None else None,
+                "state": action_results["state"].tolist() if action_results["state"] is not None else None,
+                "timing": {
+                    "subtask_ms": subtask_time * 1000,
+                    "action_ms": action_time * 1000,
+                    "total_ms": total_time * 1000,
+                },
+            }
 
-        total_ms = (time.time() - start_time) * 1000
+            logger.info(f"Request completed in {total_time:.3f}s (subtask: {subtask_time:.3f}s, action: {action_time:.3f}s)")
+            return response
 
-        await self._cancel_refresh_task(websocket)
-        subtask_refresh_enabled = False
-        if subtask_refresh_interval is not None and float(subtask_refresh_interval) > 0:
-            subtask_refresh_enabled = True
-            refresh_low_prompt = subtask if subtask else low_level_prompt
-            refresh_task = asyncio.create_task(
-                self._handle_periodic_refresh(
-                    websocket=websocket,
-                    images=images,
-                    high_level_prompt=high_level_prompt,
-                    low_level_prompt=refresh_low_prompt,
-                    state=state_array,
-                    refresh_interval=float(subtask_refresh_interval),
-                    max_decoding_steps=max_decoding_steps,
-                    temperature=temperature,
-                    source_request_id=request_id,
-                )
-            )
-            self.active_refresh_tasks[websocket] = refresh_task
-
-        response = {
-            "status": "success",
-            "subtask": subtask,
-            "subtask_tokens": _to_list(subtask_tokens),
-            "actions": _to_list(actions),
-            "state": _to_list(state_result),
-            "timing": {
-                "subtask_ms": subtask_ms,
-                "action_ms": action_ms,
-                "total_ms": total_ms,
-            },
-            "subtask_refresh_enabled": subtask_refresh_enabled,
-            "subtask_refresh_interval": float(subtask_refresh_interval) if subtask_refresh_enabled else None,
-        }
-
-        if request_id is not None:
-            response["request_id"] = request_id
-
-        return response
-
-    async def _handle_periodic_refresh(
-        self,
-        websocket: WebSocketServerProtocol,
-        images: dict[str, np.ndarray],
-        high_level_prompt: str,
-        low_level_prompt: str,
-        state: np.ndarray | None,
-        refresh_interval: float,
-        max_decoding_steps: int,
-        temperature: float,
-        source_request_id: str | None,
-    ):
-        """Periodic subtask refresh loop for a connected client."""
-        refresh_count = 0
-        current_low_prompt = low_level_prompt
-
-        while True:
-            try:
-                await asyncio.sleep(refresh_interval)
-                refresh_count += 1
-
-                result = await self.inference_engine.infer(
-                    images=images,
-                    high_level_prompt=high_level_prompt,
-                    low_level_prompt=current_low_prompt,
-                    state=state,
-                    generate_subtask=True,
-                    max_decoding_steps=max_decoding_steps,
-                    temperature=temperature,
-                    noise=None,
-                )
-
-                current_low_prompt = result.get("subtask") or current_low_prompt
-                refresh_message = {
-                    "type": "subtask_refresh",
-                    "subtask": current_low_prompt,
-                    "subtask_tokens": _to_list(result.get("subtask_tokens")),
-                    "refresh_count": refresh_count,
-                    "timestamp": time.time(),
-                }
-                if source_request_id is not None:
-                    refresh_message["source_request_id"] = source_request_id
-
-                await self._send_json(websocket, refresh_message)
-
-            except asyncio.CancelledError:
-                logger.info("Refresh task cancelled: %s", websocket.remote_address)
-                break
-            except websockets.exceptions.ConnectionClosed:
-                logger.info("Connection closed while refreshing: %s", websocket.remote_address)
-                break
-            except Exception as e:
-                logger.error("Error in periodic refresh: %s", e)
-                await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Error processing inference request: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e), "status": "error"}
 
     async def start_server(self, *, skip_init: bool = False):
-        """Start websocket server."""
-        logger.info("Starting async Pi0.5 WebSocket server: %s:%s", self.host, self.port)
+        """Start WebSocket server
+
+        skip_init: If True, skip model initialization, only for connectivity testing.
+        """
+        logger.info(f"Starting Pi0.5 WebSocket server: {self.host}:{self.port}")
 
         if skip_init:
-            logger.warning("Skipping model initialization (--skip-init). Inference unavailable.")
+            logger.warning("Skipping model initialization (--skip-init). Only for connectivity testing, inference unavailable.")
         else:
-            logger.info("Initializing inference engine (this may take a while)...")
+            # Initialize inference engine
+            logger.info("Initializing inference engine (may take a long time, please wait)...")
             await self.inference_engine.initialize()
             logger.info("Inference engine initialization completed")
             
@@ -448,25 +413,14 @@ class AsyncPi05WebSocketServer:
             )
             _log_norm_values(self.norm_stats)
 
-            self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
-            logger.info("Normalization file loaded from: %s", self.norm_stats_path)
-            logger.info(
-                "Loaded normalization stats for state (%dD) and actions (%dD)",
-                len(self.norm_stats.get("state", {}).get("mean", [])),
-                len(self.norm_stats.get("actions", {}).get("mean", [])),
-            )
-            _log_norm_values(self.norm_stats)
-
+        # Start WebSocket server
+        logger.info("Starting WebSocket listener...")
+        # Increase max_size to handle large messages (e.g., action arrays, images)
         server = await websockets.serve(
-            self.handle_client,
-            self.host,
-            self.port,
-            ping_interval=60,
-            ping_timeout=60,
-            max_size=10 * 1024 * 1024,
+            self.handle_client, self.host, self.port, ping_interval=60, ping_timeout=60, max_size=10 * 1024 * 1024
         )
 
-        logger.info("Server started, listening on %s:%s", self.host, self.port)
+        logger.info(f"Server started, listening on {self.host}:{self.port}")
 
         try:
             await server.wait_closed()
@@ -478,7 +432,8 @@ class AsyncPi05WebSocketServer:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Async Pi0.5 WebSocket Server")
+    """Start server"""
+    parser = argparse.ArgumentParser(description="Pi0.5 Sync WebSocket Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Listen address")
     parser.add_argument("--port", type=int, default=8765, help="Listen port")
     parser.add_argument("--config", type=str, default="libero_pi05_subtask_hybrid", help="Model config name")
@@ -489,18 +444,18 @@ async def main():
         default=None,
         help="Override checkpoint path (directory or params file).",
     )
-    parser.add_argument("--skip-init", action="store_true", help="Skip model initialization")
+    parser.add_argument("--skip-init", action="store_true", help="Skip model initialization, only for connectivity testing")
     parser.add_argument("--log-level", type=str, default="INFO", help="Log level: DEBUG/INFO/WARN/ERROR")
     args = parser.parse_args()
 
+    # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    os.environ.setdefault("OPENPI_DATA_HOME", os.path.expanduser("~/.cache/openpi"))
-
-    server = AsyncPi05WebSocketServer(
+    # Create and start server
+    server = SyncPi05WebSocketServer(
         host=args.host,
         port=args.port,
         config_name=args.config,

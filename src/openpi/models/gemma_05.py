@@ -175,7 +175,6 @@ class Attention(nn.Module):
         assert k.shape[1] == 1, "Only support kv-cache updates of length 1"
         indices = (0, idx[0], 0, 0)
         cache_dtype = k.dtype  # self.cache_dtype or k.dtype
-        # jax.debug.breakpoint()
         k_new = jax.lax.dynamic_update_slice(k_cache, k.astype(cache_dtype), indices)
         v_new = jax.lax.dynamic_update_slice(v_cache, v.astype(cache_dtype), indices)
         idx_new = idx + 1

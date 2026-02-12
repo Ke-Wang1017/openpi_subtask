@@ -787,7 +787,7 @@ _CONFIGS = [
             decay_steps=150_000,
             decay_lr=2.5e-6,
         ),
-        num_train_steps=30_000,
+        num_train_steps=40_000,
         save_interval=5000,
         batch_size=64,
         fsdp_devices=1,
