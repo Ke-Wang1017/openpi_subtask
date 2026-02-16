@@ -35,6 +35,8 @@ def _get_prompt(data: dict) -> str | None:
 
 
 def _get_state(data: dict) -> np.ndarray:
+    if "observation.state" in data:
+        return data["observation.state"]
     if "observation/state" in data:
         return data["observation/state"]
     if "state" in data:
@@ -94,17 +96,23 @@ class LiberoInputs(transforms.DataTransformFn):
         # right wrist image below.
         base_image = _get_image(
             data,
-            keys=("observation/image", "image", "images.agentview_rgb", "images.base_0_rgb"),
+            keys=("observation/image", "observation.images.image", "image", "images.agentview_rgb", "images.base_0_rgb"),
             observation_key="image",
-            images_keys=("base_0_rgb", "agentview_rgb"),
+            images_keys=("base_0_rgb", "agentview_rgb", "image"),
             label="base",
         )
         try:
             wrist_image = _get_image(
                 data,
-                keys=("observation/wrist_image", "wrist_image", "images.wrist_rgb_left", "images.wrist_rgb"),
+                keys=(
+                    "observation/wrist_image",
+                    "observation.images.wrist_image",
+                    "wrist_image",
+                    "images.wrist_rgb_left",
+                    "images.wrist_rgb",
+                ),
                 observation_key="wrist_image",
-                images_keys=("left_wrist_0_rgb", "wrist_rgb_left", "wrist_rgb"),
+                images_keys=("left_wrist_0_rgb", "wrist_rgb_left", "wrist_rgb", "wrist_image"),
                 label="wrist",
             )
         except KeyError:
@@ -131,6 +139,9 @@ class LiberoInputs(transforms.DataTransformFn):
         # Actions are only available during training.
         if "actions" in data:
             inputs["actions"] = data["actions"]
+        elif "action" in data:
+            # Some LeRobot datasets use a singular key name.
+            inputs["actions"] = data["action"]
 
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
