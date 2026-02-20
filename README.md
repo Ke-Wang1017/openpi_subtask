@@ -1,5 +1,5 @@
 # openpi
-**This is the modified version of the original openpi. Here the subtask generation capability is added to pi05 and a benchmark of LIBERO-10 is performed to show its advantage. To run the training, please look at the file `src/openpi/training/config.py` with `libero_pi05_subtask_fast` and `libero_pi05_action_expert` as subtask uses KI. For benchmarking with LIBERO look at [LIEBEO_SUBTASK_README](examples/libero/README_subtask.md).**
+**This is the modified version of the original openpi. Here the subtask generation capability is added to pi05 and a benchmark of LIBERO-10 is performed to show its advantage. To run subtask training, modify to your own datasets, and benchmarking with LIBERO, have a look at [SUBTASK_README](README_subtask.md).**
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
 
