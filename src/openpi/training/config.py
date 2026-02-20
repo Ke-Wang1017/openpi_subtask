@@ -704,12 +704,6 @@ _CONFIGS = [
         fsdp_devices=8,
         ema_decay=0.999,
         wandb_enabled=True,
-
-    #     freeze_filter=nnx.All(
-    #      nnx.Param,
-    #      nnx_utils.PathRegex(".*llm.*"),             # 匹配所有 LLM 层
-    #      nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")) # 排除 action expert 分支
-    #  )
     ),
         
     # Mode 3: Action Expert
