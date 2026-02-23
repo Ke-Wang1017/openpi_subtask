@@ -714,11 +714,12 @@ _CONFIGS = [
             action_horizon=25,
             max_token_len=256,
             discrete_state_input=False,
-            # ⭐ Only use subtask and FAST token loss
+            # ⭐ Only use action expert loss
             subtask_loss_weight=0.0,
-            fast_token_loss_weight=0.0,  # Enable FAST token loss weight
-            flow_matching_loss_weight=1.0,  # Disable flow matching
+            fast_token_loss_weight=0.0,  
+            flow_matching_loss_weight=1.0,  # Enable flow matching
             fast_tokenizer_path="physical-intelligence/fast",
+            stop_gradient_flow_to_prefix=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/kewang/.cache/openpi/openpi-checkpoints/libero_pi05_subtask_fast/my_experiment/12000/params"

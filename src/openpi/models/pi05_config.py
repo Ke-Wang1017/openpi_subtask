@@ -40,6 +40,10 @@ class Pi05Config(_model.BaseModelConfig):
     # ⭐ FAST tokenizer configuration (required when fast_token_loss_weight > 0)
     fast_tokenizer_path: str = "physical-intelligence/fast"
 
+    # If true, blocks flow-matching gradients from propagating through the
+    # language/vision prefix cache into the VLM branch.
+    stop_gradient_flow_to_prefix: bool = False
+
     def __post_init__(self):
         if self.max_token_len is None:
             if self.pi05:

@@ -101,6 +101,7 @@ class Pi05(_model.BaseModel):
         self.subtask_loss_weight = config.subtask_loss_weight
         self.fast_token_loss_weight = config.fast_token_loss_weight
         self.flow_matching_loss_weight = config.flow_matching_loss_weight
+        self.stop_gradient_flow_to_prefix = config.stop_gradient_flow_to_prefix
 
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
@@ -317,6 +318,8 @@ class Pi05(_model.BaseModel):
                 positions=prefix_positions,
                 adarms_cond=[None, None],
             )
+            if self.stop_gradient_flow_to_prefix:
+                kv_cache = jax.tree.map(jax.lax.stop_gradient, kv_cache)
 
             noise_rng, time_rng = jax.random.split(rng, 2)
             batch_shape = actions.shape[:-2]
@@ -356,12 +359,26 @@ class Pi05(_model.BaseModel):
         max_decoding_steps: int = 200,
         paligemma_eos_token: int = 1,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> tuple[at.Array, object, at.Array, at.Array]:
+        """Autoregressively generate a low-level subtask (text) from the observation.
+
+        Given images + high-level task prompt + state, the model generates token-by-token
+        a subtask description (e.g. "Move arm to cup."). The returned kv_cache is reused
+        by sample_actions() so the prefix is not recomputed when predicting actions.
+
+        Returns:
+            output_tokens: Generated token IDs [B, max_decoding_steps].
+            kv_cache: KV cache (prefix + decoded tokens) for reuse in sample_actions.
+            mask: Valid token mask over prefix + decoded tokens.
+            ar_mask: AR mask over full sequence (prefix + decoded).
+        """
         batch_size = observation.tokenized_prompt.shape[0]
+        # --- Phase 1: Prefill ---
+        # Embed prefix (images + tokenized prompt) and build causal attention mask.
         prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
 
-        # left to right align all input token sequences
+        # Right-align variable-length sequences so positions match later decoding.
         prefix_token_embeddings, prefix_mask, prefix_attn_mask = left_to_right_align(
             prefix_token_embeddings, prefix_mask, prefix_attn_mask
         )
@@ -369,22 +386,23 @@ class Pi05(_model.BaseModel):
         prefill_len = jnp.sum(prefix_mask, axis=-1)
         prefix_start = prefill_size - prefill_len
 
+        # Pad attention mask for future decoding steps (KV cache size = prefill + max_decoding_steps).
         prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
         prefix_positions = jnp.cumsum(prefix_mask, axis=-1) - 1
-        # import pdb; pdb.set_trace()
         (prefix_out, _), kv_cache = self.PaliGemma.llm(
             [prefix_token_embeddings, None], mask=prefix_attn_mask, positions=prefix_positions, adarms_cond=[None, None]
         )
+        # Get logits for the last prefix position (first token to generate).
         last_token_embedding = prefix_out[:, -1:]
         last_logits = self.PaliGemma.llm(last_token_embedding, method="deembed")
         last_logits = jax.nn.log_softmax(last_logits, axis=-1)
+        # 0 is used as "not yet generated" padding for remaining decode slots.
         output_tokens = jnp.zeros((batch_size, max_decoding_steps))
 
         def step(carry):
             rng, last_logit, output_tokens, cache, _, step = carry
 
-            # Sample token from last logit
-            # Split RNG for this step
+            # Sample next token: greedy (argmax) if temperature=0, else categorical.
             rng, rng_step = jax.random.split(rng)
             token = jax.lax.cond(
                 temperature > 0.0,
@@ -394,14 +412,14 @@ class Pi05(_model.BaseModel):
             )
             output_tokens = put_along_last_axis(output_tokens, jnp.broadcast_to(step, (token.shape[0], 1)), token)
 
-            # Check for early stopping --> stop if all batch elements have EOS token
-            ### TODO: erase extra decoded token due to mismatch
+            # Early stopping when every batch element has produced EOS.
             has_eos = jnp.any(token == paligemma_eos_token, axis=-1)
             all_eos = jnp.all(has_eos)
 
-            # Decode one step
+            # One forward pass: new token only, reusing kv_cache.
             token_embedding = self.PaliGemma.llm(token, method="embed")
             positions = prefill_len[:, None] + step
+            # Causal mask: current query (single new token) can attend to prefix_start..(prefill_size + step).
             mask = jnp.logical_and(
                 jnp.arange(prefill_size + max_decoding_steps)[None, None, :] >= prefix_start[:, None, None],
                 jnp.arange(prefill_size + max_decoding_steps)[None, None, :]
@@ -419,21 +437,17 @@ class Pi05(_model.BaseModel):
 
         def cond(carry):
             _, _, _, _, all_eos, step = carry
+            # Continue until either everyone emitted EOS at the same step or max steps reached.
             return (~all_eos) & (step < max_decoding_steps)
-            # return step < max_decoding_steps
 
-        # Use lax.while_loop so we can jit the full decoding loop.
+        # Use lax.while_loop so the full decoding loop is JIT-compatible.
         _, _, output_tokens, kv_cache, _, _ = jax.lax.while_loop(
             cond, step, (rng, last_logits, output_tokens, kv_cache, False, 0)
         )
 
+        # Build full-sequence mask and ar_mask for downstream use (e.g. sample_actions).
         mask = jnp.concatenate([prefix_mask, (output_tokens != 0).astype(jnp.bool_)], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(max_decoding_steps, dtype=jnp.bool_)], axis=0)
-        # Notice:
-        #  output_tokens [B, max_decoding_steps]
-        #  kv_cache [B, prefix_len+max_decoding_steps, ...]
-        #  mask [B, prefix_len+max_decoding_steps]
-        #  ar_mask [prefix_len+max_decoding_steps]
         return output_tokens, kv_cache, mask, ar_mask
 
     @override
