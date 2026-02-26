@@ -61,34 +61,27 @@ class PaligemmaTokenizer:
         self, high_prompt: str, low_prompt: str, state: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
-        low_prompt.lower().strip().replace("_", " ").replace("\n", " ")
+        # Bug fix: assign result to cleaned_low_text (was discarded before)
+        cleaned_low_text = low_prompt.lower().strip().replace("_", " ").replace("\n", " ")  # noqa: F841
+
+        if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
+            cleaned_high_text = cleaned_high_text[:-1]
+        cleaned_high_text += "."
 
         if state is not None:
-            # This is the Pi05 format, where the state is part of the discrete language input.
+            # Pi05 format: state is discretized and embedded as a string in the language prompt.
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
             state_str = " ".join(map(str, discretized_state))
+            # Bug fix: use ";" (not ",") before State to match tokenize_high_low_prompt (training format).
+            sub_prompt_1 = f"Task: {cleaned_high_text}; State: {state_str}; Subtask: "
+        else:
+            # Bug fix: handle state=None so tokens/ar_mask/loss_mask are always defined.
+            sub_prompt_1 = f"Task: {cleaned_high_text}; Subtask: "
 
-            # Remove the last punctuation character if present and add custom symbol
-            if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
-                cleaned_high_text = cleaned_high_text[:-1]
-            cleaned_high_text += "."  # Add your custom symbol here
-            sub_prompt_1 = f"Task: {cleaned_high_text}, State: {state_str}; Subtask: "
-            tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
-            ar_mask = [True] * len(tokens_1)
-            loss_mask = [False] * len(tokens_1)
-
-            # Remove the last punctuation character if present and add custom symbol
-            # if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
-            #     cleaned_low_text = cleaned_low_text[:-1]
-            # # cleaned_low_text += '.'  # Add your custom symbol here
-            # sub_prompt_2 = f"{cleaned_low_text}"
-            # # sub_prompt_2 = f"{cleaned_low_text}"# Warning: State is not included here which is different from original pi05
-            # tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
-            # ar_mask += [1] * len(tokens_2)
-            # loss_mask += [True] * len(tokens_2)
-
-            # tokens = tokens_1 + tokens_2
-            tokens = tokens_1
+        tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
+        tokens = tokens_1
+        ar_mask = [True] * len(tokens_1)
+        loss_mask = [False] * len(tokens_1)
 
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
@@ -115,7 +108,6 @@ class PaligemmaTokenizer:
             np.asarray(loss_mask),
         )
 
-    # TODO: REMOVE replicated code
     def tokenize_high_level_prompt(self, high_prompt: str) -> tuple[np.ndarray, np.ndarray]:
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
         # remove the last punctuation character if present
@@ -136,89 +128,151 @@ class PaligemmaTokenizer:
                 )
             tokens_1 = tokens_1[: self._max_len]
             mask = [True] * self._max_len
-        return np.asarray(tokens), np.asarray(mask)
+        return np.asarray(tokens_1), np.asarray(mask)
 
     def tokenize_high_low_prompt(
         self,
         high_prompt: str,
         low_prompt: str,
         state: np.ndarray | None = None,
-        actions: np.ndarray | None = None,  # Optional: actions for FAST tokenization
+        actions: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Tokenize high-low prompt with optional FAST action tokens.
+        """Build the full token sequence for Pi05 hierarchical training.
+
+        Constructs a structured prompt that concatenates three segments in order:
+
+            [high-level task + state] + [subtask] + [FAST action tokens (optional)]
+
+        Depending on training mode, the token sequence looks like:
+
+            Flow matching mode (actions=None):
+                "Task: pick up cup. State: 127 64 ...; Subtask: move arm to cup.;\nAction: <EOS>"
+
+            FAST token mode (actions provided):
+                "Task: pick up cup. State: 127 64 ...; Subtask: move arm to cup;\nAction: <tok1><tok2>...|<EOS>"
+
+        Args:
+            high_prompt: High-level task description string, e.g. "Pick up the cup".
+                Will be normalized (lowercased, underscores replaced with spaces) and
+                punctuation-normalized to end with a period.
+            low_prompt: Low-level subtask description string, e.g. "Move arm to the cup".
+                This is the target the model is trained to predict autoregressively.
+                Same normalization applied as high_prompt.
+            state: Robot proprioceptive state vector of shape (state_dim,), assumed to be
+                normalized to [-1, 1]. Each dimension is discretized into 256 integer bins
+                and encoded as a space-separated string inside the language prompt.
+            actions: Optional continuous action trajectory of shape (action_horizon, action_dim),
+                assumed to be normalized to [-1, 1]. When provided together with a loaded
+                FAST tokenizer, the trajectory is encoded as discrete action tokens and
+                appended as segment 3. When None, only the subtask text is produced (flow
+                matching mode).
 
         Returns:
-            tuple: (tokens, mask, ar_mask, loss_mask, subtask_region_mask, action_region_mask)
-            - tokens: Token IDs
-            - mask: Valid token mask
-            - ar_mask: Auto-regressive mask
-            - loss_mask: Overall loss mask (subtask_region_mask OR action_region_mask)
-            - subtask_region_mask: Mask for subtask tokens (for separate loss calculation)
-            - action_region_mask: Mask for action tokens (for separate loss calculation)
+            A tuple of six parallel numpy arrays, all of length `max_len`:
 
-        If actions is None or FAST tokenizer not loaded, only generate subtask tokens (for flow matching mode).
-        If actions is provided and FAST tokenizer loaded, append FAST action tokens.
+            tokens (np.ndarray, int, shape (max_len,)):
+                Token IDs for the full sequence. Padding positions contain 0.
+
+            mask (np.ndarray, bool, shape (max_len,)):
+                True for real (non-padding) tokens, False for padding positions.
+                Used to exclude padding from attention.
+
+            ar_mask (np.ndarray, int32, shape (max_len,)):
+                Autoregressive schedule consumed by `make_attn_mask`. A value of True (1)
+                marks a causal barrier — each position can only attend to positions with
+                an equal or smaller cumulative sum of this mask. All real token positions
+                are set to True so the sequence has fully causal (left-to-right) attention.
+                Padding positions are False (0).
+
+            loss_mask (np.ndarray, bool, shape (max_len,)):
+                True on positions where cross-entropy loss is computed. Covers both the
+                subtask region and the action token region; False on the task/state prefix
+                (segment 1) and on padding.
+
+            subtask_region_mask (np.ndarray, bool, shape (max_len,)):
+                True only on subtask tokens (segment 2). Used to compute a separately
+                weighted subtask loss (controlled by `subtask_loss_weight` in Pi05Config).
+
+            action_region_mask (np.ndarray, bool, shape (max_len,)):
+                True only on FAST action tokens (segment 3). Used to compute a separately
+                weighted action token loss (controlled by `fast_token_loss_weight` in
+                Pi05Config). All-False when no action tokens are present.
         """
         cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
         cleaned_low_text = low_prompt.lower().strip().replace("_", " ").replace("\n", " ")
 
-        # This is the Pi05 format, where the state is part of the discrete language input.
+        # Pi05 encodes the robot state as a discretized string inside the language prompt
+        # (rather than as a continuous vector in the suffix), so the LLM can condition on it.
+        # Each state dimension is binned into one of 256 levels over [-1, 1].
         discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
         state_str = " ".join(map(str, discretized_state))
 
-        # 1. High prompt (不计算 loss)
+        # ── Segment 1: High-level task prompt + discretized state ──────────────────
+        # This is the conditioning context. No loss is computed here since the model
+        # receives this as given input, not as something it needs to predict.
         if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
             cleaned_high_text = cleaned_high_text[:-1]
         cleaned_high_text += "."
         sub_prompt_1 = f"Task: {cleaned_high_text}; State: {state_str}; Subtask: "
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
-        ar_mask = [True] * len(tokens_1)
-        loss_mask = [False] * len(tokens_1)
-        subtask_region_mask = [False] * len(tokens_1)  # mark subtask region
-        action_region_mask = [False] * len(tokens_1)  # mark action token region
+        ar_mask = [True] * len(tokens_1)           # causal attention over the prefix
+        loss_mask = [False] * len(tokens_1)         # no loss on task/state context
+        subtask_region_mask = [False] * len(tokens_1)
+        action_region_mask = [False] * len(tokens_1)
 
-        # 2. Low prompt (subtask) - decide the end token based on whether FAST tokens are needed
+        # ── Segment 2: Low-level subtask text ──────────────────────────────────────
+        # This is what the model must predict autoregressively given the task+state
+        # context above. Loss is computed on every token in this segment.
+        # The segment ending differs by training mode:
+        #   - Flow matching mode: ends with ";\nAction: " + EOS, signalling the end
+        #     of subtask generation and the start of continuous action denoising.
+        #   - FAST token mode: ends with ";" only (no EOS yet), because the discrete
+        #     action tokens will be appended as segment 3.
         if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
             cleaned_low_text = cleaned_low_text[:-1]
         cleaned_low_text += "."
 
         if actions is None or self._fast_tokenizer is None:
-            # Flow matching mode: end with ";\nAction: "
             sub_prompt_2 = f"{cleaned_low_text};\nAction: "
             tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
         else:
-            # FAST token mode: first subtask, then add action tokens
             sub_prompt_2 = f"{cleaned_low_text};"
             tokens_2 = self._tokenizer.encode(sub_prompt_2)
 
         ar_mask += [True] * len(tokens_2)
-        loss_mask += [True] * len(tokens_2)
-        subtask_region_mask += [True] * len(tokens_2)  # mark subtask tokens
+        loss_mask += [True] * len(tokens_2)         # compute loss on the predicted subtask
+        subtask_region_mask += [True] * len(tokens_2)
         action_region_mask += [False] * len(tokens_2)
 
         tokens = tokens_1 + tokens_2
 
-        # 3. Optional: add FAST action tokens
+        # ── Segment 3 (optional): FAST discrete action tokens ──────────────────────
+        # Only present during FAST token training (hybrid or KI stage 1).
+        # The FAST tokenizer converts the continuous action trajectory into a compact
+        # sequence of discrete tokens. These are then mapped into the tail of the
+        # PaliGemma vocabulary (last 128 slots reserved for special use are skipped).
+        # Format: "\nAction: " + <fast_tokens> + "|" + EOS
+        # Loss is computed on all tokens in this segment (action_region_mask).
         if actions is not None and self._fast_tokenizer is not None:
-            # Tokenize actions with FAST
             action_tokens_fast = self._fast_tokenizer(actions[None])[0]
+            # Map FAST token IDs into the PaliGemma vocabulary tail
             action_tokens_pg = self._act_tokens_to_paligemma_tokens(action_tokens_fast)
 
-            # Add "Action: " prefix and "|" suffix
             action_seq = (
                 self._tokenizer.encode("\nAction: ")
                 + action_tokens_pg.tolist()
-                + self._tokenizer.encode("|", add_eos=True)
+                + self._tokenizer.encode("|", add_eos=True)  # "|" marks end of action sequence
             )
 
             tokens += action_seq
             ar_mask += [True] * len(action_seq)
             loss_mask += [True] * len(action_seq)
             subtask_region_mask += [False] * len(action_seq)
-            action_region_mask += [True] * len(action_seq)  # action tokens
+            action_region_mask += [True] * len(action_seq)
 
-        # 4. Padding
+        # ── Padding / truncation to max_len ────────────────────────────────────────
+        # All six arrays must share the same fixed length so they can be batched.
+        # Padding positions are represented as 0 / False in every array.
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
             padding = [False] * (self._max_len - tokens_len)

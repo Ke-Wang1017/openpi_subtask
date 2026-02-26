@@ -172,10 +172,10 @@ class SubtaskModelTransformFactory(GroupFactory):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI05:
-                # ⭐ 根据 fast_token_loss_weight 决定是否使用 FAST tokens
+                # Use FAST tokens only if fast_token_loss_weight > 0
                 use_fast_tokens = getattr(model_config, "fast_token_loss_weight", 0.0) > 0
 
-                # ⭐ 创建 tokenizer(带或不带 FAST)
+                # Build tokenizer kwargs (with or without FAST tokenizer path)
                 tokenizer_kwargs = {"max_len": model_config.max_token_len}
                 if use_fast_tokens:
                     fast_tokenizer_path = getattr(model_config, "fast_tokenizer_path", "physical-intelligence/fast")

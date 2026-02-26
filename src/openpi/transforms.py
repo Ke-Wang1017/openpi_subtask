@@ -305,7 +305,7 @@ class TokenizeHighLowPrompt(DataTransformFn):
         if state is None:
             raise ValueError("State is required for TokenizeHighLowPrompt")
 
-        # ⭐ 根据配置决定是否传递 actions
+        # ⭐ Decide whether to pass actions based on the config
         actions = data.get("actions") if self.use_fast_tokens else None
 
         tokens, token_masks, ar_mask, loss_mask, subtask_region_mask, action_region_mask = (
