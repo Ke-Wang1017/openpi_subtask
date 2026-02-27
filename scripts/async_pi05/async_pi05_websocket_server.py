@@ -181,6 +181,8 @@ class AsyncPi05WebSocketServer:
             checkpoint_path=checkpoint_path,
         )
         self.clients = set()
+        self.send_locks: dict[WebSocketServerProtocol, asyncio.Lock] = {}
+        self.active_refresh_tasks: dict[WebSocketServerProtocol, asyncio.Task] = {}
         self.norm_stats = None  # Will be loaded during initialization
         self.norm_stats_path = None
 
@@ -205,6 +207,11 @@ class AsyncPi05WebSocketServer:
         self.send_locks.pop(websocket, None)
         await self._cancel_refresh_task(websocket)
         logger.info("Client disconnected: %s", websocket.remote_address)
+
+    async def _send_json(self, websocket: WebSocketServerProtocol, payload: dict[str, Any]) -> None:
+        lock = self.send_locks.setdefault(websocket, asyncio.Lock())
+        async with lock:
+            await websocket.send(json.dumps(payload))
 
     async def handle_client(self, websocket: WebSocketServerProtocol, path: str | None = None):
         await self.register_client(websocket)
@@ -238,7 +245,7 @@ class AsyncPi05WebSocketServer:
         finally:
             await self.unregister_client(websocket)
 
-    async def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def process_request(self, websocket: WebSocketServerProtocol, request: dict[str, Any]) -> dict[str, Any]:
         """Process inference request - generates subtask first, then actions.
         
         This is a simplified synchronous approach where:
@@ -246,6 +253,7 @@ class AsyncPi05WebSocketServer:
         2. Actions are generated using the subtask as low-level prompt
         3. Both subtask and actions are returned in one response
         """
+        request_id = request.get("request_id") if isinstance(request, dict) else None
         try:
             # Validate request format
             if "images" not in request or "high_level_prompt" not in request:
@@ -254,10 +262,14 @@ class AsyncPi05WebSocketServer:
             # Extract request parameters
             images_data = request["images"]
             high_level_prompt = request["high_level_prompt"]
+            low_level_prompt = request.get("low_level_prompt", "")
             state = request.get("state")
+            generate_subtask = request.get("generate_subtask", True)
+            generate_actions = request.get("generate_actions", True)
             max_decoding_steps = request.get("max_decoding_steps", 25)
             temperature = request.get("temperature", 0.1)
             noise = request.get("noise")
+            subtask_refresh_interval = request.get("subtask_refresh_interval")
 
             # Convert image data
             images = {}
@@ -292,87 +304,98 @@ class AsyncPi05WebSocketServer:
                 noise_array = np.array(noise, dtype=np.float32)
 
             start_time = time.time()
-
-            # Step 1: Generate subtask from high-level prompt
-            logger.info(f"Generating subtask for: {high_level_prompt}")
-            subtask_start = time.time()
-            subtask_result = await self.inference_engine.infer(
-                images=images,
-                high_level_prompt=high_level_prompt,
-                low_level_prompt=low_level_prompt,
-                state=state_array,
-                generate_subtask=True,
-                max_decoding_steps=max_decoding_steps,
-                temperature=temperature,
-                noise=None,
-            )
-            subtask_ms = (time.time() - subtask_start) * 1000
-            subtask = subtask_result.get("subtask", "")
-            subtask_tokens = subtask_result.get("subtask_tokens")
-            state_result = subtask_result.get("state")
-        else:
+            subtask_ms = 0.0
+            action_ms = 0.0
             subtask = low_level_prompt
+            subtask_tokens = None
+            state_result = state_array
+            actions = None
 
-        if generate_actions:
-            prompt_for_actions = subtask if subtask is not None else low_level_prompt
-            action_start = time.time()
-            action_result = await self.inference_engine.infer(
-                images=images,
-                high_level_prompt=high_level_prompt,
-                low_level_prompt=prompt_for_actions,
-                state=state_array,
-                generate_subtask=False,
-                max_decoding_steps=max_decoding_steps,
-                temperature=temperature,
-                noise=noise_array,
-            )
-            action_ms = (time.time() - action_start) * 1000
-            state_result = action_result.get("state", state_result)
-            actions = action_result.get("actions")
-            if actions is not None:
-                actions = unnormalize_actions(np.asarray(actions), self.norm_stats, use_quantiles=True)
-
-        total_ms = (time.time() - start_time) * 1000
-
-        await self._cancel_refresh_task(websocket)
-        subtask_refresh_enabled = False
-        if subtask_refresh_interval is not None and float(subtask_refresh_interval) > 0:
-            subtask_refresh_enabled = True
-            refresh_low_prompt = subtask if subtask else low_level_prompt
-            refresh_task = asyncio.create_task(
-                self._handle_periodic_refresh(
-                    websocket=websocket,
+            if generate_subtask:
+                # Step 1: Generate subtask from high-level prompt
+                logger.info("Generating subtask for: %s", high_level_prompt)
+                subtask_start = time.time()
+                subtask_result = await self.inference_engine.infer(
                     images=images,
                     high_level_prompt=high_level_prompt,
-                    low_level_prompt=refresh_low_prompt,
+                    low_level_prompt=low_level_prompt,
                     state=state_array,
-                    refresh_interval=float(subtask_refresh_interval),
+                    generate_subtask=True,
                     max_decoding_steps=max_decoding_steps,
                     temperature=temperature,
-                    source_request_id=request_id,
+                    noise=None,
                 )
-            )
-            self.active_refresh_tasks[websocket] = refresh_task
+                subtask_ms = (time.time() - subtask_start) * 1000
+                subtask = subtask_result.get("subtask", "")
+                subtask_tokens = subtask_result.get("subtask_tokens")
+                state_result = subtask_result.get("state", state_result)
 
-        response = {
-            "status": "success",
-            "subtask": subtask,
-            "subtask_tokens": _to_list(subtask_tokens),
-            "actions": _to_list(actions),
-            "state": _to_list(state_result),
-            "timing": {
-                "subtask_ms": subtask_ms,
-                "action_ms": action_ms,
-                "total_ms": total_ms,
-            },
-            "subtask_refresh_enabled": subtask_refresh_enabled,
-            "subtask_refresh_interval": float(subtask_refresh_interval) if subtask_refresh_enabled else None,
-        }
+            if generate_actions:
+                prompt_for_actions = subtask if subtask is not None else low_level_prompt
+                action_start = time.time()
+                action_result = await self.inference_engine.infer(
+                    images=images,
+                    high_level_prompt=high_level_prompt,
+                    low_level_prompt=prompt_for_actions,
+                    state=state_array,
+                    generate_subtask=False,
+                    max_decoding_steps=max_decoding_steps,
+                    temperature=temperature,
+                    noise=noise_array,
+                )
+                action_ms = (time.time() - action_start) * 1000
+                state_result = action_result.get("state", state_result)
+                actions = action_result.get("actions")
+                if actions is not None:
+                    actions = unnormalize_actions(np.asarray(actions), self.norm_stats, use_quantiles=True)
 
-        if request_id is not None:
-            response["request_id"] = request_id
+            total_ms = (time.time() - start_time) * 1000
 
-        return response
+            await self._cancel_refresh_task(websocket)
+            subtask_refresh_enabled = False
+            if subtask_refresh_interval is not None and float(subtask_refresh_interval) > 0:
+                subtask_refresh_enabled = True
+                refresh_low_prompt = subtask if subtask else low_level_prompt
+                refresh_task = asyncio.create_task(
+                    self._handle_periodic_refresh(
+                        websocket=websocket,
+                        images=images,
+                        high_level_prompt=high_level_prompt,
+                        low_level_prompt=refresh_low_prompt,
+                        state=state_array,
+                        refresh_interval=float(subtask_refresh_interval),
+                        max_decoding_steps=max_decoding_steps,
+                        temperature=temperature,
+                        source_request_id=request_id,
+                    )
+                )
+                self.active_refresh_tasks[websocket] = refresh_task
+
+            response = {
+                "status": "success",
+                "subtask": subtask,
+                "subtask_tokens": _to_list(subtask_tokens),
+                "actions": _to_list(actions),
+                "state": _to_list(state_result),
+                "timing": {
+                    "subtask_ms": subtask_ms,
+                    "action_ms": action_ms,
+                    "total_ms": total_ms,
+                },
+                "subtask_refresh_enabled": subtask_refresh_enabled,
+                "subtask_refresh_interval": float(subtask_refresh_interval) if subtask_refresh_enabled else None,
+            }
+
+            if request_id is not None:
+                response["request_id"] = request_id
+
+            return response
+        except Exception as e:
+            logger.exception("Error in process_request")
+            response = {"status": "error", "error": str(e)}
+            if request_id is not None:
+                response["request_id"] = request_id
+            return response
 
     async def _handle_periodic_refresh(
         self,
@@ -445,15 +468,6 @@ class AsyncPi05WebSocketServer:
             logger.info("Normalization file loaded from: %s", self.norm_stats_path)
             logger.info(
                 f"Loaded normalization stats for state ({len(self.norm_stats.get('state', {}).get('mean', []))}D) and actions ({len(self.norm_stats.get('actions', {}).get('mean', []))}D)"
-            )
-            _log_norm_values(self.norm_stats)
-
-            self.norm_stats, self.norm_stats_path = load_norm_stats(self.checkpoint_path, self.config_name)
-            logger.info("Normalization file loaded from: %s", self.norm_stats_path)
-            logger.info(
-                "Loaded normalization stats for state (%dD) and actions (%dD)",
-                len(self.norm_stats.get("state", {}).get("mean", [])),
-                len(self.norm_stats.get("actions", {}).get("mean", [])),
             )
             _log_norm_values(self.norm_stats)
 
