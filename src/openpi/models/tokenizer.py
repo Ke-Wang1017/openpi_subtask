@@ -310,9 +310,13 @@ class PaligemmaTokenizer:
         return self._tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
 
     def detokenize(self, tokens: np.ndarray) -> str:
-        """Decode tokens back to text, removing padding tokens."""
+        """Decode tokens back to text, truncating at EOS and removing padding."""
         # Remove padding tokens (tokens with value 0)
         non_padding_tokens = tokens[tokens != 0]
+        # Truncate at first EOS token (token 1)
+        eos_positions = np.where(non_padding_tokens == 1)[0]
+        if len(eos_positions) > 0:
+            non_padding_tokens = non_padding_tokens[:eos_positions[0]]
         return self._tokenizer.decode(non_padding_tokens.tolist())
 
 
