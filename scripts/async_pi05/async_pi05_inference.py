@@ -260,7 +260,8 @@ class AsyncPi05Inference:
             return self.jit_sample_actions(rng, observation)
 
         sampled_actions = await self._run_blocking(_sample, use_model_lock=True)
-        return np.array(sampled_actions[0])
+        # sampled_actions is (x_0, output_tokens) tuple; x_0 shape is (1, action_horizon, action_dim)
+        return np.array(sampled_actions[0][0])
 
     async def infer(
         self,
